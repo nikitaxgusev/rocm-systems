@@ -199,6 +199,8 @@ struct setupReq {
 
 NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
 RCCL_PARAM(AinicRoce, "AINIC_ROCE", 0);
+// 0 = disabled (LOW only), 1 = round-robin HIGH/LOW, 2 = HIGH only
+RCCL_PARAM(AinicUdmaBalance, "AINIC_UDMA_BALANCE", 1);
 
 static_assert(sizeof(ncclNetHandle_t) + sizeof(int) <= CONNECT_SIZE, "Not large enough ncclConnect to hold ncclNetHandle_t and useGdr flag");
 
