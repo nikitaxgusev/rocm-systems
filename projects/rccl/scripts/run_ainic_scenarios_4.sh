@@ -92,6 +92,8 @@ CLI_NP=""
 ITERS=5
 CONFIGS_STR="${DEFAULT_CONFIGS}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
+RESUME_ITER=1
+RESUME_CFG=0
 LAUNCHER="auto"
 GEN_SBATCH=""
 PARTITION=""
@@ -108,7 +110,7 @@ SIZE_FACTOR="${SIZE_FACTOR:-2}"
 GID_INDEX="${GID_INDEX:-1}"
 
 COLLECTIVES=(
-  all_reduce
+  #all_reduce
   alltoall
 )
 
@@ -133,6 +135,12 @@ while [[ $# -gt 0 ]]; do
     --timeout)
       [[ $# -ge 2 ]] || { echo "ERROR: --timeout requires value"; exit 1; }
       RUN_TIMEOUT="$2"; shift 2 ;;
+    --resume-iter)
+      [[ $# -ge 2 ]] || { echo "ERROR: --resume-iter requires value"; exit 1; }
+      RESUME_ITER="$2"; shift 2 ;;
+    --resume-cfg)
+      [[ $# -ge 2 ]] || { echo "ERROR: --resume-cfg requires value"; exit 1; }
+      RESUME_CFG="$2"; shift 2 ;;
     --results-dir)
       [[ $# -ge 2 ]] || { echo "ERROR: --results-dir requires value"; exit 1; }
       RESULTS_DIR="$2"; shift 2 ;;
@@ -389,7 +397,14 @@ export PATH="${MPI_HOME}/bin${PATH:+:$PATH}"
 mkdir -p "$RESULTS_DIR"
 
 total=$(( ITERS * ${#SELECTED[@]} * ${#COLLECTIVES[@]} ))
-current=0
+
+# Calculate how many tasks to skip based on resume point
+skipped_iters=$(( RESUME_ITER - 1 ))
+skipped_cfgs=0
+for cfg_idx in "${SELECTED[@]}"; do
+  (( cfg_idx < RESUME_CFG )) && (( skipped_cfgs++ )) || true
+done
+current=$(( skipped_iters * ${#SELECTED[@]} * ${#COLLECTIVES[@]} + skipped_cfgs * ${#COLLECTIVES[@]} ))
 
 echo "======================================================================"
 echo "AINIC scenario sweep — $(timestamp)"
@@ -418,6 +433,14 @@ for iter in $(seq 1 "$ITERS"); do
   echo "══════ Iteration ${iter}/${ITERS} — $(timestamp) ══════"
 
   for cfg_idx in "${SELECTED[@]}"; do
+    # Resume: skip iterations/configs already completed
+    if (( iter < RESUME_ITER )); then
+      continue
+    fi
+    if (( iter == RESUME_ITER && cfg_idx < RESUME_CFG )); then
+      continue
+    fi
+
     IFS='|' read -r cfg_name _ <<< "${CFGS[$cfg_idx]}"
     echo ""
     echo "--- Config [${cfg_idx}]: ${cfg_name} ---"

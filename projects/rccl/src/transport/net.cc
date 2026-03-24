@@ -207,6 +207,8 @@ NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
 static rcclIBNicInfo rcclPrimaryNicInfo = {rcclIBNicTypeUnknown, 0, 0};
 
 RCCL_PARAM(AinicRoce, "AINIC_ROCE", -1);
+RCCL_PARAM(AinicUdmaBalance, "AINIC_UDMA_BALANCE", -1);
+RCCL_PARAM(AinicCtsDepth, "AINIC_CTS_DEPTH", 0);
 static const char* sysfsIBPath = "/sys/class/infiniband";
 
 static int readIBNicRate(const char* devName) {
@@ -1023,7 +1025,7 @@ static ncclResult_t ncclNetGetDeviceHandle(ncclNetDeviceType type, int version, 
 static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
   ncclNet_ctxt_t ncclNetCtxt = {};
   struct sendNetResources* resources = (struct sendNetResources*)(connection->transportResources);
-  bool rcclAinicRoce = ((rcclParamAinicRoce() == 1) ? true : false);
+  bool rcclAinicRoce = rcclUseAinic();
   if (reqSize != sizeof(netSendConnectArgs)) return ncclInternalError;
   ncclResult_t ret = ncclSuccess;
   netSendConnectArgs* req = (netSendConnectArgs*) reqBuff;
@@ -1245,7 +1247,7 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
   resources->tpRemoteProxyRank = req->proxyRank;
   ncclResult_t ret = ncclSuccess;
   ncclNet_ctxt_t ncclNetCtxt = {};
-  bool rcclAinicRoce = ((rcclParamAinicRoce() == 1) ? true : false);
+  bool rcclAinicRoce = rcclUseAinic();
 
   setNetAttrs(proxyState, &req->netAttr);
 
@@ -1561,6 +1563,8 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
   if (args->state == ncclProxyOpProgress) {
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
+    int ctsDepth = (int)rcclParamAinicCtsDepth();
+    if (ctsDepth > 0) maxDepth = std::min(maxDepth, ctsDepth);
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
       int postedStepId = sub->posted;
@@ -1859,6 +1863,8 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
   if (args->state == ncclProxyOpProgress) {
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
+    int ctsDepth = (int)rcclParamAinicCtsDepth();
+    if (ctsDepth > 0) maxDepth = std::min(maxDepth, ctsDepth);
     for (int s=0; s<args->nsubs; s+=args->subs[s].groupSize) {
       struct ncclProxySubArgs* subGroup = args->subs+s;
       int subCount = 0;
