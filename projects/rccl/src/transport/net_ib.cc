@@ -30,6 +30,7 @@
 #include "ibvwrap.h"
 #include "mlx5/mlx5dvwrap.h"
 #include "graph/xml.h"
+#include "net_telemetry.h"
 
 #define MAXSUFFIXSIZE 16
 #define MAXNAMESIZE (64 + MAXSUFFIXSIZE)
@@ -110,6 +111,7 @@ struct ncclIbMergedDev ncclIbMergedDevs[MAX_IB_VDEVS];
 struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
 static std::mutex ncclIbMutex;
 static int ncclIbRelaxedOrderingEnabled = 0;
+static int rcclIbTelNextChId = 0;
 
 // With ncclNet_v11_t the NCCL core initializes the network plugin per-communicator
 // rather than once for all communicators. However, the internal plugin implementation
@@ -815,6 +817,7 @@ ncclResult_t ncclIbInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config
       int nIpIfs = 0;
       ncclNIbDevs = 0;
       ncclNMergedIbDevs = 0;
+      rcclTelemetryInit();
       NCCLCHECK(ncclFindInterfaces(ncclIbIfName, &ncclIbIfAddr, MAX_IF_NAME_SIZE, 1, &nIpIfs));
       if (nIpIfs != 1) {
         WARN("NET/IB : No IP interface found.");
@@ -934,6 +937,12 @@ ncclResult_t ncclIbInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config
               PTHREADCHECKGOTO(pthread_create(&ncclIbAsyncThread, NULL, ncclIbAsyncThreadMain, ncclIbDevs + ncclNIbDevs), "pthread_create", ret, fail);
               ncclSetThreadName(ncclIbAsyncThread, "NCCL IbAsync %2d", ncclNIbDevs);
               PTHREADCHECKGOTO(pthread_detach(ncclIbAsyncThread), "pthread_detach", ret, fail); // will not be pthread_join()'d
+
+              if (rcclTelemetryEnabled) {
+                char telEthDev[64] = "";
+                rcclTelemetryGetEthDevice(ncclIbDevs[ncclNIbDevs].devName, telEthDev, sizeof(telEthDev));
+                rcclTelemetryRegisterDevice(ncclNIbDevs, ncclIbDevs[ncclNIbDevs].devName, telEthDev, "IB");
+              }
               ncclNIbDevs++;
               nPorts++;
             }
@@ -1267,6 +1276,7 @@ struct ncclIbRequest {
   struct ncclProfilerInfo pInfo[NCCL_NET_IB_MAX_RECVS];
 #endif
   int nreqs;
+  uint64_t tel_post_ts;
   union {
     struct {
       int size;
@@ -1316,6 +1326,7 @@ struct ncclIbQp {
   struct ibv_qp* qp;
   int devIndex;
   int remDevIdx;
+  int telQpSlot;
 };
 
 struct ncclIbRemSizesFifo {
@@ -1370,6 +1381,7 @@ struct ncclIbSendComm {
   struct ncclIbRemSizesFifo remSizesFifo;
   uint64_t fifoHead;
   int ar; // Use adaptive routing when all merged devices have it enabled
+  int telChId;
 };
 // The SendFifo needs to be 32-byte aligned and each element needs
 // to be a 32-byte multiple, so that an entry does not get split and
@@ -1411,6 +1423,7 @@ struct ncclIbRecvComm {
   int sizesFifo[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   int gpuFlushHostMem;
   int flushEnabled;
+  int telChId;
 };
 static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm fifo must be 32-byte aligned");
 
@@ -1460,6 +1473,7 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base, 
   qpInitAttr.cap.max_recv_sge = 1;
   qpInitAttr.cap.max_inline_data = ncclParamIbUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
   NCCLCHECK(wrap_ibv_create_qp(&qp->qp, base->pd, &qpInitAttr));
+  qp->telQpSlot = -1;
   struct ibv_qp_attr qpAttr;
   memset(&qpAttr, 0, sizeof(struct ibv_qp_attr));
   qpAttr.qp_state = IBV_QPS_INIT;
@@ -1655,6 +1669,23 @@ ib_recv_dev_list:
       meta.qpInfo[q].ece_supported = 0;
     }
     devIndex = (devIndex + 1) % comm->base.vProps.ndevs;
+  }
+
+  /* Setup telemetry channel with QPs using helper function */
+  comm->telChId = __atomic_fetch_add(&rcclIbTelNextChId, 1, __ATOMIC_RELAXED);
+  for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+    int ibDevN = comm->base.vProps.devs[i];
+    int numQpsForDev = 0;
+    for (int q = 0; q < comm->base.nqps; q++)
+      if (comm->base.qps[q].devIndex == i) numQpsForDev++;
+    int startSlot = rcclTelemetrySetupChannel(ibDevN, comm->telChId, numQpsForDev, 1 /*isDataQp*/);
+    if (startSlot >= 0) {
+      int slotOffset = 0;
+      for (int q = 0; q < comm->base.nqps; q++) {
+        if (comm->base.qps[q].devIndex == i)
+          comm->base.qps[q].telQpSlot = startSlot + slotOffset++;
+      }
+    }
   }
 
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
@@ -2027,6 +2058,22 @@ ib_recv:
     }
   }
 
+  rComm->telChId = __atomic_fetch_add(&rcclIbTelNextChId, 1, __ATOMIC_RELAXED);
+  for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
+    int telIbDevN = rComm->base.vProps.devs[i];
+    int numQpsForDev = 0;
+    for (int q = 0; q < rComm->base.nqps; q++)
+      if (rComm->base.qps[q].devIndex == i) numQpsForDev++;
+    int startSlot = rcclTelemetrySetupChannel(telIbDevN, rComm->telChId, numQpsForDev, 0 /*isCtsQp*/);
+    if (startSlot >= 0) {
+      int slotOffset = 0;
+      for (int q = 0; q < rComm->base.nqps; q++) {
+        if (rComm->base.qps[q].devIndex == i)
+          rComm->base.qps[q].telQpSlot = startSlot + slotOffset++;
+      }
+    }
+  }
+
   // GDR mode selection logic
   peermemAvailable = (ncclIbGdrSupport() == ncclSuccess);
   dmabufSupported = (ncclIbDmaBufSupport(lComm->dev) == ncclSuccess);
@@ -2211,6 +2258,7 @@ ncclResult_t ncclIbGetRequest(struct ncclIbNetCommBase* base, struct ncclIbReque
     if (r->type == NCCL_NET_IB_REQ_UNUSED) {
       r->base = base;
       r->sock = NULL;
+      r->tel_post_ts = 0;
       memset(r->devBases, 0, sizeof(r->devBases));
       memset(r->events, 0, sizeof(r->events));
       *req = r;
@@ -2478,13 +2526,18 @@ ncclResult_t ncclIbMultiSend(struct ncclIbSendComm* comm, int slot) {
       reqs[r]->pInfo[0].nEventHandles++;
     }
 #endif
+    if (rcclTelemetryEnabled && i == 0) {
+      int64_t _tel_ns = rcclTelemetryGetNs();
+      for (int r=0; r<nreqs; r++) reqs[r]->tel_post_ts = _tel_ns;
+    }
     ret = wrap_ibv_post_send(qp->qp, comm->wrs, &bad_wr);
     if (ret != ncclSuccess) {
-      // Mark connection as fatal. DO NOT free requests here - the caller
-      // (ncclIbIsend) owns the requests and will handle cleanup.
-      // Some requests may have events from earlier QP iterations.
       ncclIbStatsFatalError(&comm->base.stats);
       return ret;
+    }
+
+    if (qp->telQpSlot >= 0) {
+      rcclTelemetryWqeSent(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
     }
 
     for (int r=0; r<nreqs; r++) {
@@ -2592,6 +2645,7 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
 
     TIME_START(0);
     NCCLCHECKGOTO(ncclIbMultiSend(comm, slot), ret, fail);
+    rcclTelemetrySendPosted(comm->base.vProps.devs[0], (uint64_t)size);
 
     // Clear slots[0]->nreqs, as well as other fields to help debugging and sanity checks
     memset((void*)slots, 0, sizeof(struct ncclIbSendFifo));
@@ -2772,7 +2826,13 @@ ncclResult_t ncclIbIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
       req->pInfo[r].nEventHandles++;
     }
 #endif
+    if (rcclTelemetryEnabled && i == 0) {
+      req->tel_post_ts = rcclTelemetryGetNs();
+    }
     NCCLCHECKGOTO(wrap_ibv_post_recv(qp->qp, &wr, &bad_wr), ret, fail);
+    if (qp->telQpSlot >= 0) {
+      rcclTelemetryWqeRecvd(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
+    }
     comm->base.qpIndex = (comm->base.qpIndex+1)%comm->base.nqps;
   }
 
@@ -2923,9 +2983,18 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
         // is already recorded in stats and will be caught on next operation.
         return ncclSuccess;
       }
+      if (r->devBases[0]) {
+        int telDev = r->devBases[0]->ibDevN;
+        int telCh = r->base->isSend
+          ? ((struct ncclIbSendComm*)(r->base))->telChId
+          : ((struct ncclIbRecvComm*)(r->base))->telChId;
+        rcclTelemetryChannelCompleted(telDev, telCh);
+      }
       if (sizes && r->type == NCCL_NET_IB_REQ_RECV) {
         for (int i=0; i<r->nreqs; i++) {
           sizes[i] = r->recv.sizes[i];
+          if (r->devBases[0])
+            rcclTelemetryRecvPosted(r->devBases[0]->ibDevN, (uint64_t)sizes[i]);
 #ifdef NCCL_ENABLE_NET_PROFILING
           for (int j = 0; j < r->pInfo[i].nEventHandles; j++) {
             NCCLCHECK(ncclProfilerFunction(&r->pInfo[i].qpEventHandles[j], ncclProfilerNetEventStop, NULL, 0, NULL));
@@ -2980,6 +3049,7 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
             WARN("NET/IB: Got completion from peer %s with status=%d opcode=%d len=%u vendor err %u (%s)%s%s%s%s hca %s",
                 ncclSocketToString(&addr, line), wc->status, wc->opcode, wc->byte_len, wc->vendor_err, reqTypeStr[r->type],
                 localGidStr ?  " localGid ":"", localGidString, remoteGidStr ? " remoteGids":"", remoteGidString, hcaName);
+            rcclTelemetryCqError(r->devBases[i]->ibDevN);
             ret = ncclRemoteError;
             failDevIdx = i;
             goto fail;
@@ -3030,6 +3100,21 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
               NCCLCHECK(ncclProfilerFunction(&req->pInfo[j].qpEventHandles[qpIndex], ncclProfilerNetEventStop, NULL, 0, NULL));
             }
 #endif
+          }
+          if (rcclTelemetryEnabled) {
+            int telCh = (r->type == NCCL_NET_IB_REQ_SEND) ?
+              ((struct ncclIbSendComm*)(r->base))->telChId :
+              (r->type == NCCL_NET_IB_REQ_RECV) ?
+              ((struct ncclIbRecvComm*)(r->base))->telChId : -1;
+            int telQp = -1;
+            for (int q = 0; q < r->base->nqps; q++) {
+              if (r->base->qps[q].qp && r->base->qps[q].qp->qp_num == wc->qp_num) {
+                telQp = r->base->qps[q].telQpSlot;
+                break;
+              }
+            }
+            rcclTelemetryWqeComplete(r->devBases[i]->ibDevN, telCh, telQp,
+                                     r->base->reqs[wc->wr_id & 0xff].tel_post_ts);
           }
         }
         // Once the IB fatal event is reported in the async thread, we want to propagate this error
@@ -3119,6 +3204,7 @@ ncclResult_t ncclIbCloseListen(void* listenComm) {
 
 ncclResult_t ncclIbFinalize(void* ctx) {
   netRefCount--;
+  if (netRefCount == 0) rcclTelemetryFlush();
   return ncclSuccess;
 }
 

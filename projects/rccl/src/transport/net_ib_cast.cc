@@ -12,6 +12,7 @@
 #include "graph.h"
 #include "utils.h"
 #include "param.h"
+#include "net_telemetry.h"
 #include "profiler/net_ib.h"
 
 #include <assert.h>
@@ -1089,6 +1090,7 @@ err_exit:
 
 ncclResult_t IbCastInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config, ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction) {
   if (netRefCount++) return ncclSuccess;
+  rcclTelemetryInit();
   ncclResult_t ret = ncclSuccess;
   ncclProfilerFunction = profFunction;
   if (ncclParamIbCastDisable()) return ncclInternalError;
@@ -1230,6 +1232,14 @@ ncclResult_t IbCastInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config
               PTHREADCHECKGOTO(pthread_create(&IbCastAsyncThread, NULL, IbCastAsyncThreadMain, IbCastDevs + ncclNIbDevs), "pthread_create", ret, fail);
               ncclSetThreadName(IbCastAsyncThread, "NCCL IbAsync %2d", ncclNIbDevs);
               PTHREADCHECKGOTO(pthread_detach(IbCastAsyncThread), "pthread_detach", ret, fail); // will not be pthread_join()'d
+
+              // Register device with telemetry
+              {
+                char telEthDev[64];
+                rcclTelemetryGetEthDevice(IbCastDevs[ncclNIbDevs].devName, telEthDev, sizeof(telEthDev));
+                rcclTelemetryRegisterDevice(ncclNIbDevs, IbCastDevs[ncclNIbDevs].devName,
+                                            telEthDev, "IB-CAST");
+              }
 
               // Add this plain physical device to the list of virtual devices
               int vDev;
@@ -1599,6 +1609,7 @@ struct ncclIbRequest {
 #endif
   int nreqs;
   struct IbCastQpSchedDesc desc;
+  uint64_t tel_post_ts;
   union {
     struct {
       int size;
@@ -1655,6 +1666,7 @@ struct ncclIbQp {
   int devIndex;
   int remDevIdx;
   int8_t ctsQpSlot;
+  int telQpSlot;
 };
 
 struct ncclIbRemSizesFifo {
@@ -1724,6 +1736,7 @@ struct ncclIbSendComm {
   struct ncclIbRemSizesFifo remSizesFifo;
   uint64_t fifoHead;
   int ar; // Use adaptive routing when all merged devices have it enabled
+  int telChId; // Telemetry: NCCL channel ID for this communicator
 };
 // The SendFifo needs to be 32-byte aligned and each element needs
 // to be a 32-byte multiple, so that an entry does not get split and
@@ -1767,6 +1780,7 @@ struct ncclIbRecvComm {
   int sizesFifo[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   int gpuFlushHostMem;
   int flushEnabled;
+  int telChId; // Telemetry: NCCL channel ID for this communicator
 };
 static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm fifo must be 32-byte aligned");
 
@@ -1871,6 +1885,7 @@ ncclResult_t IbCastCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
   if (rcclAinicRoce) {
     qp->ctsQpSlot = cts_qp_slot;
   }
+  qp->telQpSlot = -1;
   return ncclSuccess;
 }
 
@@ -2062,6 +2077,23 @@ ib_recv_dev_list:
       meta.qpInfo[q].ece_supported = 0;
     }
     devIndex = (devIndex + 1) % comm->base.vProps.ndevs;
+  }
+
+  comm->telChId = channel_id;
+
+  for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+    int ibDevN = comm->base.vProps.devs[i];
+    int numQpsForDev = 0;
+    for (int q = 0; q < comm->base.nqps; q++)
+      if (comm->base.qps[q].devIndex == i) numQpsForDev++;
+    int startSlot = rcclTelemetrySetupChannel(ibDevN, channel_id, numQpsForDev, 1 /*isDataQp*/);
+    if (startSlot >= 0) {
+      int slotOffset = 0;
+      for (int q = 0; q < comm->base.nqps; q++) {
+        if (comm->base.qps[q].devIndex == i)
+          comm->base.qps[q].telQpSlot = startSlot + slotOffset++;
+      }
+    }
   }
 
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
@@ -2455,6 +2487,23 @@ ib_recv:
     }
   }
 
+  rComm->telChId = channel_id;
+
+  for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
+    int telIbDevN = rComm->base.vProps.devs[i];
+    int numQpsForDev = 0;
+    for (int q = 0; q < rComm->base.nqps; q++)
+      if (rComm->base.qps[q].devIndex == i) numQpsForDev++;
+    int startSlot = rcclTelemetrySetupChannel(telIbDevN, channel_id, numQpsForDev, 0 /*isCtsQp*/);
+    if (startSlot >= 0) {
+      int slotOffset = 0;
+      for (int q = 0; q < rComm->base.nqps; q++) {
+        if (rComm->base.qps[q].devIndex == i)
+          rComm->base.qps[q].telQpSlot = startSlot + slotOffset++;
+      }
+    }
+  }
+
   useDmaBuf  = (IbCastDmaBufSupport(lComm->dev) == ncclSuccess && ncclParamDmaBufEnable());
   rComm->flushEnabled = ((IbCastGdrSupport() == ncclSuccess || useDmaBuf)
                             && (ncclIbGdrFlushDisable == 0)) ? 1 : 0;
@@ -2593,6 +2642,7 @@ ncclResult_t IbCastGetRequest(struct ncclIbNetCommBase* base, struct ncclIbReque
       memset(r->devBases, 0, sizeof(r->devBases));
       memset(r->events, 0, sizeof(r->events));
       memset(r->ctsEvents, 0, sizeof(r->ctsEvents));
+      r->tel_post_ts = 0;
       *req = r;
       return ncclSuccess;
     }
@@ -3093,7 +3143,15 @@ static ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int n
       reqs[r]->pInfo[0].nEventHandles++;
     }
 #endif
+    if (rcclTelemetryEnabled && i == 0) {
+      int64_t _tel_ns = rcclTelemetryGetNs();
+      for (int r=0; r<nreqs; r++) reqs[r]->tel_post_ts = _tel_ns;
+    }
+
     NCCLCHECK(wrap_ibv_post_send(qp->qp, comm->wrs, &bad_wr));
+
+    if (qp->telQpSlot >= 0)
+      rcclTelemetryWqeSent(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
 
     for (int r=0; r<nreqs; r++) {
       int chunkSize;
@@ -3314,6 +3372,8 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
     TIME_START(0);
     NCCLCHECK(IbCastMultiSend(comm, slot, nqps, startQpIndex, wrrSched, use_write_op));
 
+    rcclTelemetrySendPosted(comm->base.vProps.devs[0], (uint64_t)size);
+
     // Clear slots[0]->nreqs, as well as other fields to help debugging and sanity checks
     if (!rcclCtsOffloadEnabled) {
       memset((void*)slots, 0, sizeof(struct ncclIbSendFifo));
@@ -3504,8 +3564,12 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
       IbCastAddEvent(req, qp->devIndex, &comm->devs[qp->devIndex].base, false);
       if (comm->base.rxPosts[curQpIndex] < MAX_REQUESTS) {
         wr.wr_id = curQpIndex;
+        if (rcclTelemetryEnabled && i == 0)
+          req->tel_post_ts = rcclTelemetryGetNs();
         NCCLCHECK(wrap_ibv_post_recv(qp->qp, &wr, &bad_wr));
         comm->base.rxPosts[curQpIndex]++;
+        if (qp->telQpSlot >= 0)
+          rcclTelemetryWqeRecvd(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
       }
 #ifdef NCCL_ENABLE_NET_PROFILING
       // Start a QP event for every request in the multirecv and every qp
@@ -3622,9 +3686,17 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
     if (r->events[0] == 0 && r->events[1] == 0 && r->events[2] == 0 && r->events[3] == 0) {
       TRACE(NCCL_NET, "r=%p done", r);
       *done = 1;
+      if (r->devBases[0]) {
+        int telDev = r->devBases[0]->ibDevN;
+        int telCh = (r->type == NCCL_NET_IB_REQ_SEND)
+          ? ((struct ncclIbSendComm*)(r->base))->telChId
+          : ((struct ncclIbRecvComm*)(r->base))->telChId;
+        rcclTelemetryChannelCompleted(telDev, telCh);
+      }
       if (sizes && r->type == NCCL_NET_IB_REQ_RECV) {
         for (int i=0; i<r->nreqs; i++) {
           sizes[i] = r->recv.sizes[i];
+          rcclTelemetryRecvPosted(r->devBases[0]->ibDevN, (uint64_t)sizes[i]);
 #ifdef NCCL_ENABLE_NET_PROFILING
           for (int j = 0; j < r->pInfo[i].nEventHandles; j++) {
             NCCLCHECK(ncclProfilerFunction(&r->pInfo[i].qpEventHandles[j], ncclProfilerNetEventStop, NULL, 0, NULL));
@@ -3680,6 +3752,7 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
             WARN("NET/IB: Got completion from peer %s with status=%d opcode=%d len=%u vendor err %u (%s)%s%s%s%s hca %s",
                 ncclSocketToString(&addr, line), wc->status, wc->opcode, wc->byte_len, wc->vendor_err, IbCastReqTypeStr[r->type],
                 localGidStr ?  " localGid ":"", localGidString, remoteGidStr ? " remoteGids":"", remoteGidString, hcaName);
+            rcclTelemetryCqError(r->devBases[i]->ibDevN);
             return ncclRemoteError;
           }
 
@@ -3703,6 +3776,24 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
             IbCastQpSchedFreeRemap(remapWrId);
           } else {
             wrId = wc->wr_id;
+          }
+
+          if (rcclTelemetryEnabled) {
+            int telCh = -1;
+            int qpIdx = -1;
+            int64_t postTs = 0;
+            if (r->type == NCCL_NET_IB_REQ_SEND) {
+              telCh = ((struct ncclIbSendComm*)(r->base))->telChId;
+              qpIdx = localRemapWrId.qpIndex;
+              postTs = r->base->reqs[wrId & 0xff].tel_post_ts;
+            } else if (r->type == NCCL_NET_IB_REQ_RECV && wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+              telCh = ((struct ncclIbRecvComm*)(r->base))->telChId;
+              qpIdx = (int)wrId;
+              postTs = r->base->reqs[(wc->imm_data >> WR_IMM_RX_REQ_IDX_SHIFT) & WR_IMM_RX_REQ_IDX_MASK].tel_post_ts;
+            }
+            int telQp = (qpIdx >= 0 && qpIdx < r->base->nqps) ?
+              r->base->qps[qpIdx].telQpSlot : -1;
+            rcclTelemetryWqeComplete(r->devBases[i]->ibDevN, telCh, telQp, postTs);
           }
 
           struct ncclIbRequest* req;
@@ -3842,7 +3933,9 @@ ncclResult_t IbCastCloseListen(void* listenComm) {
 }
 
 ncclResult_t IbCastFinalize(void* ctx) {
-  netRefCount--;
+  if (--netRefCount == 0) {
+    rcclTelemetryFlush();
+  }
   return ncclSuccess;
 }
 
