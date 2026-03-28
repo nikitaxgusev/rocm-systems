@@ -1,4 +1,3 @@
-diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 --- a/src/transport/net_ib.cc
 +++ b/src/transport/net_ib.cc
 @@ -29,6 +29,7 @@
@@ -9,7 +8,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  #include "graph/xml.h"
  
  #define MAXSUFFIXSIZE 16
-@@ -110,6 +111,26 @@ struct ncclIbMergedDev ncclIbMergedDevs[
+@@ -110,6 +111,26 @@
  struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
  static std::mutex ncclIbMutex;
  static int ncclIbRelaxedOrderingEnabled = 0;
@@ -36,7 +35,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  
  // With ncclNet_v11_t the NCCL core initializes the network plugin per-communicator
  // rather than once for all communicators. However, the internal plugin implementation
-@@ -120,6 +141,8 @@ static int netRefCount;
+@@ -120,6 +141,8 @@
  
  #define NCCL_IB_LLSTR(ll) (((ll) == IBV_LINK_LAYER_INFINIBAND) ? "IB" : (((ll) == IBV_LINK_LAYER_ETHERNET) ? "RoCE" : "UNSPECIFIED"))
  
@@ -45,7 +44,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  #define NCCL_IB_SL_DEFAULT 0
  #define NCCL_IB_TC_DEFAULT 0
  
-@@ -141,6 +164,13 @@ NCCL_PARAM(IbEceEnable,"IB_ECE_ENABLE",1
+@@ -141,6 +164,14 @@
  NCCL_PARAM(IbDataDirect,"IB_DATA_DIRECT",1);
  NCCL_PARAM(IbQpsPerConn, "IB_QPS_PER_CONNECTION", 1);
  RCCL_PARAM(IbQpsPerP2p, "IB_QPS_PER_P2P", 0);
@@ -54,15 +53,16 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +// AMD AINIC
 +RCCL_PARAM(CtsInlineData, "CTS_INLINE_DATA", -1);
 +RCCL_PARAM(CtsOffloadEnabled, "CTS_OFFLOAD_ENABLED", -1);
++RCCL_PARAM(CtsDisableP2p, "CTS_DISABLE_P2P", 1);
 +
 +extern int64_t rcclParamAinicRoce();
  
  static ncclResult_t ncclIbStatsInit(struct ncclIbStats* stat) {
    __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
-@@ -751,6 +781,19 @@ ncclResult_t ncclIbMakeVDeviceInternal(i
+@@ -774,6 +805,19 @@
+       break;
      }
    }
- 
 +  // CTS Offload and CTS Inline are not yet compatible with NIC Fusion
 +  // (NCCL_IB_MERGE_NICS). Disable them when a multi-NIC vNIC is created.
 +  if (props->ndevs > 1) {
@@ -76,10 +76,10 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +    }
 +  }
 +
+   ncclIbMergedDevs[ncclNMergedIbDevs] = tmp;
    *d = ncclNMergedIbDevs++;
-   INFO(NCCL_NET, "NET/IB : Made virtual device [%d] name=%s speed=%d ndevs=%d", *d, mDev->devName, mDev->speed, mDev->vProps.ndevs);
-   return ncclSuccess;
-@@ -779,6 +822,10 @@ ncclResult_t ncclIbInit(void** ctx, uint
+   INFO(NCCL_NET, "NET/IB : Made virtual device [%d] name=%s speed=%d ndevs=%d", *d, tmp.devName, tmp.speed, tmp.vProps.ndevs);
+@@ -803,6 +847,10 @@
    static int shownIbHcaEnv = 0;
    if(wrap_ibv_symbols() != ncclSuccess) { return ncclInternalError; }
    if(wrap_mlx5dv_symbols() != ncclSuccess) { INFO(NCCL_NET, "NET/IB : Failed to open mlx5dv symbols. Advance features like CX-8 Direct-NIC will be disabled."); }
@@ -90,7 +90,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  
    // Detect IB cards
    int nIbDevs = 0;
-@@ -944,6 +991,37 @@ ncclResult_t ncclIbInit(void** ctx, uint
+@@ -966,6 +1014,38 @@
      INFO(NCCL_INIT|NCCL_NET, "NET/IB : Using%s %s; OOB %s:%s", line, ncclIbRelaxedOrderingEnabled ? "[RO]" : "",
            ncclIbIfName, ncclSocketToString(&ncclIbIfAddr, addrline));
  
@@ -122,13 +122,14 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +      ncclIbGdrFlushDisable = 1;
 +
 +      INFO(NCCL_INIT|NCCL_NET, "NET/IB : AINIC RoCEv2 optimizations enabled: CTS Inline Data: %s; CTS Offload: %s; "
-+           "IB Use Inline: enabled; GDR Flush: disabled", rcclCtsInlineData ? "Enabled": "Disabled",
-+           rcclCtsOffloadEnabled ? "Enabled": "Disabled");
++           "IB Use Inline: enabled; GDR Flush: disabled; CTS Disable P2P: %s", rcclCtsInlineData ? "Enabled": "Disabled",
++           rcclCtsOffloadEnabled ? "Enabled": "Disabled",
++           rcclParamCtsDisableP2p() ? "Yes" : "No");
 +    }
    }
  exit:
    ibContext.trafficClass = config->trafficClass;
-@@ -1280,6 +1358,8 @@ struct ncclIbListenComm {
+@@ -1302,6 +1382,8 @@
    struct ncclIbCommStage stage;
  };
  
@@ -137,7 +138,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  struct alignas(64) ncclIbSendFifo {
    uint64_t addr;
    uint64_t size;
-@@ -1290,10 +1370,21 @@ struct alignas(64) ncclIbSendFifo {
+@@ -1312,10 +1394,21 @@
    char padding[16];
  };
  
@@ -159,7 +160,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  };
  
  struct ncclIbRemSizesFifo {
-@@ -1340,6 +1431,7 @@ struct ncclIbSendComm {
+@@ -1362,6 +1455,7 @@
    struct ncclIbNetCommBase base;
    // Start with fifo and ibv structs as they have alignment restrictions
    struct ncclIbSendFifo fifo[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
@@ -167,7 +168,16 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    struct ibv_sge sges[NCCL_NET_IB_MAX_RECVS];
    struct ibv_send_wr wrs[NCCL_NET_IB_MAX_RECVS + 1];
    // Each dev correlates to a mergedIbDev
-@@ -1355,6 +1447,7 @@ struct ncclIbSendComm {
+@@ -1370,6 +1464,8 @@
+   struct ncclIbRemSizesFifo remSizesFifo;
+   uint64_t fifoHead;
+   int ar; // Use adaptive routing when all merged devices have it enabled
++  bool useCtsOffload;
++  bool useCtsInlineData;
+ };
+ // The SendFifo needs to be 32-byte aligned and each element needs
+ // to be a 32-byte multiple, so that an entry does not get split and
+@@ -1377,6 +1473,7 @@
  static_assert((sizeof(struct ncclIbNetCommBase) % 32) == 0, "ncclIbNetCommBase size must be 32-byte multiple to ensure fifo is at proper offset");
  static_assert((offsetof(struct ncclIbSendComm, fifo) % 32) == 0, "ncclIbSendComm fifo must be 32-byte aligned");
  static_assert((sizeof(struct ncclIbSendFifo) % 32) == 0, "ncclIbSendFifo element size must be 32-byte multiples");
@@ -175,7 +185,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  static_assert((offsetof(struct ncclIbSendComm, sges) % 32) == 0, "sges must be 32-byte aligned");
  static_assert((offsetof(struct ncclIbSendComm, wrs) % 32) == 0, "wrs must be 32-byte aligned");
  
-@@ -1369,6 +1462,7 @@ struct ncclIbGpuFlush {
+@@ -1391,6 +1488,7 @@
  
  struct ncclIbRemFifo {
    struct ncclIbSendFifo elems[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
@@ -183,14 +193,24 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    uint64_t fifoTail;
    uint64_t addr;
    uint32_t flags;
-@@ -1424,20 +1518,59 @@ ncclResult_t ncclIbDestroyBase(struct nc
+@@ -1411,6 +1509,8 @@
+   int sizesFifo[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
+   int gpuFlushHostMem;
+   int flushEnabled;
++  bool useCtsOffload;
++  bool useCtsInlineData;
+ };
+ static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm fifo must be 32-byte aligned");
+ 
+@@ -1446,20 +1546,70 @@
    return ncclSuccess;
  }
  
 -ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base, int access_flags, void* qp_context, struct ncclIbQp* qp) {
 +ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
 +                            int access_flags, void* qp_context, struct ncclIbQp* qp,
-+                            int channel_id, bool data_qp, int8_t cts_qp_slot) {
++                            int channel_id, bool data_qp, int8_t cts_qp_slot,
++                            int isP2p = 0) {
    struct ibv_qp_init_attr qpInitAttr;
 +  enum ncclIbChannelType channel_type = (data_qp ? ncclIbChannelTypeData : ncclIbChannelTypeCts);
    memset(&qpInitAttr, 0, sizeof(struct ibv_qp_init_attr));
@@ -199,6 +219,17 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    qpInitAttr.recv_cq = base->cq;
    qpInitAttr.qp_type = IBV_QPT_RC;
 +
++  // QP-level CTS offload: for AINIC non-data QPs, always keep CTS offload at
++  // the hardware level (bit 19) because the driver rejects non-data QPs without
++  // it. For data QPs, respect CTS_DISABLE_P2P normally.
++  // The P2P CTS disable is enforced at the software level (useCtsOffload/
++  // useCtsInlineData on the comm struct + no IBV_SEND_INLINE for FIFO posts).
++  bool qpCtsOffload;
++  if (rcclAinicRoce && !data_qp) {
++    qpCtsOffload = rcclCtsOffloadEnabled;
++  } else {
++    qpCtsOffload = rcclCtsOffloadEnabled && !(isP2p && rcclParamCtsDisableP2p());
++  }
 +  if (rcclAinicRoce) {
 +    if (!nccl_channel_ud_map[base->ibDevN][channel_id][channel_type].udAllocated) {
 +      bool lud = nccl_channel_last_ud[base->ibDevN][channel_type];
@@ -220,20 +251,19 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +    }
 +    qpInitAttr.sq_sig_all |= (1 << 18);
 +
-+    if (rcclCtsOffloadEnabled) {
++    if (qpCtsOffload) {
 +      qpInitAttr.sq_sig_all |= (1 << 19);
 +    } else {
 +      qpInitAttr.sq_sig_all &= (~(1 << 19));
 +    }
 +  }
-+
    // We might send 2 messages per send (RDMA and RDMA_WITH_IMM)
    qpInitAttr.cap.max_send_wr = 2*MAX_REQUESTS;
    qpInitAttr.cap.max_recv_wr = MAX_REQUESTS;
    qpInitAttr.cap.max_send_sge = 1;
    qpInitAttr.cap.max_recv_sge = 1;
 -  qpInitAttr.cap.max_inline_data = ncclParamIbUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
-+  if (rcclCtsInlineData) {
++  if (qpCtsOffload && !data_qp && rcclCtsInlineData) {
 +    qpInitAttr.cap.max_inline_data = MAX_INLINE_DATA_SIZE;
 +  } else {
 +    qpInitAttr.cap.max_inline_data = ncclIbUseInline ? sizeof(struct ncclIbSendFifo) : 0;
@@ -245,7 +275,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    struct ibv_qp_attr qpAttr;
    memset(&qpAttr, 0, sizeof(struct ibv_qp_attr));
    qpAttr.qp_state = IBV_QPS_INIT;
-@@ -1447,6 +1580,9 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_p
+@@ -1469,6 +1619,9 @@
    NCCLCHECK(wrap_ibv_modify_qp(qp->qp, &qpAttr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS));
    TRACE(NCCL_NET, "NET/IB : ncclIbCreateQp port=%d dev=%d devName=%s ndevs=%d nmdevs=%d qpn=%u pkey=%u pd=%p",
      ib_port, base->ibDevN, ncclIbDevs[base->ibDevN].devName, ncclNIbDevs, ncclNMergedIbDevs, qp->qp->qp_num, qpAttr.pkey_index, base->pd);
@@ -255,7 +285,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    return ncclSuccess;
  }
  
-@@ -1530,16 +1666,21 @@ fail:
+@@ -1552,16 +1705,21 @@
    goto exit;
  }
  
@@ -279,21 +309,32 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    if (stage->state == ncclIbCommStateConnect)      goto ib_connect_check;
    if (stage->state == ncclIbCommStateSendDevList)  goto ib_send_dev_list;
    if (stage->state == ncclIbCommStateRecvDevList)  goto ib_recv_dev_list;
-@@ -1621,7 +1762,7 @@ ib_recv_dev_list:
+@@ -1622,7 +1780,9 @@
+ 
+   // Read isP2p from handle
+   isP2p = handle->isP2p;
+-  INFO(NCCL_NET, "NET/IB: ncclIbConnect isP2p=%d", isP2p);
++  comm->useCtsOffload = rcclCtsOffloadEnabled && !(isP2p && rcclParamCtsDisableP2p());
++  comm->useCtsInlineData = rcclCtsInlineData && !(isP2p && rcclParamCtsDisableP2p());
++  INFO(NCCL_NET, "NET/IB: ncclIbConnect isP2p=%d useCtsOffload=%d useCtsInlineData=%d (CtsDisableP2p=%ld)", isP2p, comm->useCtsOffload, comm->useCtsInlineData, rcclParamCtsDisableP2p());
+   comm->base.nqps = ncclIbCalculateNqps(isP2p, comm->base.vProps.ndevs, 
+                                          remoteVProps.ndevs, __func__);
+ 
+@@ -1643,7 +1803,7 @@
    for (int q = 0; q < comm->base.nqps; q++) {
      ncclIbSendCommDev* commDev = comm->devs + devIndex;
      ncclIbDev* ibDev = ncclIbDevs + commDev->base.ibDevN;
 -    NCCLCHECKGOTO(ncclIbCreateQp(ibDev->portNum, &commDev->base, IBV_ACCESS_REMOTE_WRITE, &comm->base.stats, comm->base.qps + q), ret, fail);
-+    NCCLCHECKGOTO(ncclIbCreateQp(ibDev->portNum, &commDev->base, IBV_ACCESS_REMOTE_WRITE, &comm->base.stats, comm->base.qps + q, channel_id, true, NCCL_CTS_QP_SLOT_INVALID), ret, fail);
++    NCCLCHECKGOTO(ncclIbCreateQp(ibDev->portNum, &commDev->base, IBV_ACCESS_REMOTE_WRITE, &comm->base.stats, comm->base.qps + q, channel_id, true, NCCL_CTS_QP_SLOT_INVALID, isP2p), ret, fail);
      comm->base.qps[q].devIndex = devIndex;
      meta.qpInfo[q].qpn      = comm->base.qps[q].qp->qp_num;
      meta.qpInfo[q].devIndex = comm->base.qps[q].devIndex;
-@@ -1646,7 +1787,11 @@ ib_recv_dev_list:
+@@ -1668,7 +1828,11 @@
      devInfo->lid           = ibDev->portAttr.lid;
      devInfo->ibv_dev_index = commDev->base.ibDevN;
      // Prepare my fifo
 -    NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-+    if (rcclCtsInlineData) {
++    if (comm->useCtsInlineData) {
 +      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo_inline, sizeof(struct ncclIbSendFifoCtsInline)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
 +    } else {
 +      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
@@ -301,12 +342,12 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
      devInfo->fifoRkey = commDev->fifoMr->rkey;
  
      // Pack local GID info
-@@ -1689,7 +1834,11 @@ ib_recv_dev_list:
+@@ -1711,7 +1875,11 @@
      }
    }
    config = (ncclNetCommConfig_t*)ctx;
 -  meta.fifoAddr = (uint64_t)comm->fifo;
-+  if (rcclCtsInlineData) {
++  if (comm->useCtsInlineData) {
 +    meta.fifoAddr = (uint64_t)comm->fifo_inline;
 +  } else {
 +    meta.fifoAddr = (uint64_t)comm->fifo;
@@ -314,7 +355,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    meta.sl = (ncclParamIbSl() != -1) ? ncclParamIbSl() : (config && config->trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? config->trafficClass : NCCL_IB_SL_DEFAULT;
    meta.tc = (ncclParamIbTc() != -1) ? ncclParamIbTc() : (config && config->trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? config->trafficClass : NCCL_IB_TC_DEFAULT;
    strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
-@@ -1834,25 +1983,35 @@ ncclResult_t ncclIbCheckVProps(ncclNetVD
+@@ -1856,25 +2024,35 @@
    return ncclSuccess;
  }
  
@@ -353,17 +394,17 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    if (stage->state == ncclIbCommStateAccept)   goto ib_accept_check;
    if (stage->state == ncclIbCommStateRecvDevList) goto ib_recv_dev_list;
    if (stage->state == ncclIbCommStateSendDevList) goto ib_send_dev_list;
-@@ -1894,7 +2053,6 @@ ib_recv_dev_list:
+@@ -1916,7 +2094,6 @@
    }
-
+ 
    // Reduce the physical device list and store in the connection base
 -  struct ncclIbMergedDev* mergedDev;
    mergedDev = ncclIbMergedDevs + lComm->dev;
    NCCLCHECK(ncclIbCheckVProps(&mergedDev->vProps, &remoteVProps));
    rComm->base.vProps = mergedDev->vProps;
-@@ -1918,13 +2076,6 @@ ib_recv:
+@@ -1940,15 +2117,11 @@
    memcpy(&remMeta, stage->buffer, sizeof(struct ncclIbConnectionMetadata));
-
+ 
    // IB setup
 -  // Pre-declare variables because of goto
 -  struct ncclIbDev* ibDev;
@@ -374,17 +415,22 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 -
    mergedDev = ncclIbMergedDevs + lComm->dev;
    rComm->base.nRemDevs = remMeta.ndevs;
++  rComm->useCtsOffload = rcclCtsOffloadEnabled && !(remMeta.isP2p && rcclParamCtsDisableP2p());
++  rComm->useCtsInlineData = rcclCtsInlineData && !(remMeta.isP2p && rcclParamCtsDisableP2p());
++  INFO(NCCL_NET, "NET/IB: ncclIbAccept isP2p=%d useCtsOffload=%d useCtsInlineData=%d (CtsDisableP2p=%ld)", remMeta.isP2p, rComm->useCtsOffload, rComm->useCtsInlineData, rcclParamCtsDisableP2p());
    rComm->base.nqps = ncclIbCalculateNqps(remMeta.isP2p, rComm->base.vProps.ndevs, 
-@@ -1981,7 +2132,7 @@ ib_recv:
+                                           remMeta.ndevs, __func__);
+   if (rComm->base.nRemDevs != rComm->base.vProps.ndevs) {
+@@ -2003,7 +2176,7 @@
      // Local ibDevN
      ibDevN = rComm->devs[devIndex].base.ibDevN;
      ibDev = ncclIbDevs + ibDevN;
 -    NCCLCHECKGOTO(ncclIbCreateQp(ibDev->portNum, &rCommDev->base, IBV_ACCESS_REMOTE_WRITE, &rComm->base.stats, qp), ret, fail);
-+    NCCLCHECKGOTO(ncclIbCreateQp(ibDev->portNum, &rCommDev->base, IBV_ACCESS_REMOTE_WRITE, &rComm->base.stats, qp, channel_id, false, q), ret, fail);
++    NCCLCHECKGOTO(ncclIbCreateQp(ibDev->portNum, &rCommDev->base, IBV_ACCESS_REMOTE_WRITE, &rComm->base.stats, qp, channel_id, false, q, remMeta.isP2p), ret, fail);
      qp->devIndex = devIndex;
      devIndex = (devIndex + 1) % rComm->base.vProps.ndevs;
  
-@@ -2035,16 +2186,22 @@ ib_recv:
+@@ -2057,16 +2230,27 @@
    }
  
    rComm->flushEnabled = ((peermemAvailable || useDmaBuf)
@@ -393,11 +439,11 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
      rCommDev = rComm->devs + i;
      ibDev = ncclIbDevs + rCommDev->base.ibDevN;
-
+ 
      // Retain remote fifo info and prepare my RDMA ops
      rComm->remFifo.addr = remMeta.fifoAddr;
 -    NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->fifoMr, rCommDev->base.pd, &rComm->remFifo.elems, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-+    if (rcclCtsInlineData) {
++    if (rComm->useCtsInlineData) {
 +      NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->fifoMr, rCommDev->base.pd, &rComm->remFifo.elems_cts_inline,
 +                                    sizeof(struct ncclIbSendFifoCtsInline)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS,
 +                                    IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
@@ -406,11 +452,16 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +    }
      rCommDev->fifoSge.lkey = rCommDev->fifoMr->lkey;
 -    if (ncclParamIbUseInline()) rComm->remFifo.flags = IBV_SEND_INLINE;
-+    if (ncclIbUseInline) rComm->remFifo.flags = IBV_SEND_INLINE;
-
++    // On AINIC with CTS offload at QP level but CTS disabled for P2P at
++    // software level, skip IBV_SEND_INLINE: the CTS QP has max_inline=24
++    // (CTS format) but we post 64-byte standard FIFO data. Non-inline sends
++    // also bypass the hardware CTS credit mechanism, preventing exhaustion.
++    if (ncclIbUseInline && (!rcclAinicRoce || rComm->useCtsInlineData))
++      rComm->remFifo.flags = IBV_SEND_INLINE;
+ 
      // Allocate Flush dummy buffer for GPU Direct RDMA
      if (rComm->flushEnabled) {
-@@ -2082,7 +2239,7 @@ ib_recv:
+@@ -2104,7 +2288,7 @@
        rCommDev->gpuFlush.sge.addr = (uint64_t)&rComm->gpuFlushHostMem;
        rCommDev->gpuFlush.sge.length = 1;
        rCommDev->gpuFlush.sge.lkey = rCommDev->gpuFlush.hostMr->lkey;
@@ -419,7 +470,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
        struct ncclIbDevInfo devInfo;
        devInfo.lid         = ibDev->portAttr.lid;
        devInfo.link_layer  = ibDev->portAttr.link_layer;
-@@ -2304,11 +2461,16 @@ ncclResult_t ncclIbDeregMr(void* comm, v
+@@ -2326,11 +2510,16 @@
  
  NCCL_PARAM(IbSplitDataOnQps, "IB_SPLIT_DATA_ON_QPS", 0);
  
@@ -430,7 +481,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    ncclResult_t ret = ncclSuccess;
 -  int nreqs = slots[0].nreqs;
 +  int nreqs;
-+  if (rcclCtsOffloadEnabled) {
++  if (comm->useCtsOffload) {
 +    nreqs = 1;
 +  } else {
 +    nreqs = slots[0].nreqs;
@@ -438,12 +489,12 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    if (nreqs > NCCL_NET_IB_MAX_RECVS) return ncclInternalError;
  
    uint64_t wr_id = 0ULL;
-@@ -2320,7 +2482,11 @@ ncclResult_t ncclIbMultiSend(struct nccl
+@@ -2342,7 +2531,11 @@
      sge->addr=(uintptr_t)reqs[r]->send.data;
      wr->opcode = IBV_WR_RDMA_WRITE;
      wr->send_flags = 0;
 -    wr->wr.rdma.remote_addr = slots[r].addr;
-+    if (rcclCtsOffloadEnabled) {
++    if (comm->useCtsOffload) {
 +      wr->wr.rdma.remote_addr = 0xdeadbeef;
 +    } else {
 +      wr->wr.rdma.remote_addr = slots[r].addr;
@@ -451,7 +502,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
      wr->next = wr + 1;
      wr_id += (reqs[r] - comm->base.reqs) << (r*8);
  #ifdef NCCL_ENABLE_NET_PROFILING
-@@ -2331,7 +2497,7 @@ ncclResult_t ncclIbMultiSend(struct nccl
+@@ -2353,7 +2546,7 @@
    // Write size as immediate data. In the case of multi-send, only write
    // 0 or 1 as size to indicate whether there was data sent or received.
    uint32_t immData = 0;
@@ -460,7 +511,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
      immData = reqs[0]->send.size;
    } else {
      int* sizes = comm->remSizesFifo.elems[slot];
-@@ -2341,22 +2507,24 @@ ncclResult_t ncclIbMultiSend(struct nccl
+@@ -2363,22 +2556,24 @@
    }
  
    struct ibv_send_wr* lastWr = comm->wrs+nreqs-1;
@@ -498,12 +549,12 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    lastWr->next = NULL;
    lastWr->send_flags = IBV_SEND_SIGNALED;
  
-@@ -2372,7 +2540,11 @@ ncclResult_t ncclIbMultiSend(struct nccl
+@@ -2394,7 +2589,11 @@
        //ncclIbAddEvent(reqs[r], devIndex, &comm->devs[devIndex].base);
  
        // Select proper rkey (needed even for 0-size send)
 -      comm->wrs[r].wr.rdma.rkey = slots[r].rkeys[qp->remDevIdx];
-+      if (rcclCtsOffloadEnabled) {
++      if (comm->useCtsOffload) {
 +        comm->wrs[r].wr.rdma.rkey = 0xbade;
 +      } else {
 +        comm->wrs[r].wr.rdma.rkey = slots[r].rkeys[qp->remDevIdx];
@@ -511,7 +562,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  
        int chunkSize = DIVUP(DIVUP(reqs[r]->send.size, nqps), align) * align;
        int length = std::min(reqs[r]->send.size-reqs[r]->send.offset, chunkSize);
-@@ -2388,7 +2560,7 @@ ncclResult_t ncclIbMultiSend(struct nccl
+@@ -2410,7 +2609,7 @@
        }
      }
  
@@ -520,7 +571,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
        // Also make sure lastWr writes remote sizes using the right lkey
        comm->remSizesFifo.sge.lkey = comm->remSizesFifo.mrs[devIndex]->lkey;
        lastWr->wr.rdma.rkey = comm->remSizesFifo.rkeys[devIndex];
-@@ -2448,6 +2620,11 @@ ncclResult_t ncclIbIsend(void* sendComm,
+@@ -2470,6 +2669,11 @@
    ncclResult_t ret = ncclSuccess;
    struct ncclIbRequest* req = NULL;
    struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandle;
@@ -532,11 +583,11 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    int nreqs = 0;
    volatile struct ncclIbSendFifo* slots = NULL;
    int slot = (comm->fifoHead) % MAX_REQUESTS;
-@@ -2461,26 +2638,36 @@ ncclResult_t ncclIbIsend(void* sendComm,
+@@ -2483,26 +2687,36 @@
    }
    NCCLCHECKGOTO(ncclIbStatsCheckFatalCount(&comm->base.stats,__func__), ret, fail);
  
-+  if (rcclCtsOffloadEnabled) {
++  if (comm->useCtsOffload) {
 +      nreqs = 1;
 +  }
 +
@@ -548,7 +599,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 -  // Wait until all data has arrived
 -  for (int r=1; r<nreqs; r++) while(slots[r].idx != idx);
 -  __sync_synchronize(); // order the nreqsPtr load against tag/rkey/addr loads below
-+  if (!rcclCtsOffloadEnabled) {
++  if (!comm->useCtsOffload) {
 +      slots = comm->fifo[slot];
 +    idx = comm->fifoHead+1;
 +    if (slots[0].idx != idx) { *request = NULL; return ncclSuccess; }
@@ -559,7 +610,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +  }
    for (int r=0; r<nreqs; r++) {
 -    if (reqs[r] != NULL || slots[r].tag != tag) continue;
-+    if (!rcclCtsOffloadEnabled) {
++    if (!comm->useCtsOffload) {
 +      if (reqs[r] != NULL || slots[r].tag != tag) continue;
  
 -    if (size > slots[r].size) size = slots[r].size;
@@ -586,7 +637,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
      }
  
      NCCLCHECKGOTO(ncclIbGetRequest(&comm->base, &req), ret, fail);
-@@ -2523,10 +2710,12 @@ ncclResult_t ncclIbIsend(void* sendComm,
+@@ -2545,10 +2759,12 @@
      }
  
      TIME_START(0);
@@ -595,13 +646,13 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  
      // Clear slots[0]->nreqs, as well as other fields to help debugging and sanity checks
 -    memset((void*)slots, 0, sizeof(struct ncclIbSendFifo));
-+    if (!rcclCtsOffloadEnabled) {
++    if (!comm->useCtsOffload) {
 +      memset((void*)slots, 0, sizeof(struct ncclIbSendFifo));
 +    }
      memset(reqs, 0, NCCL_NET_IB_MAX_RECVS*sizeof(struct ncclIbRequest*));
      comm->fifoHead++;
      TIME_STOP(0);
-@@ -2561,30 +2750,62 @@ fail:
+@@ -2583,39 +2799,79 @@
  
  ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, int n, void** data, size_t* sizes, int* tags, void** mhandles, struct ncclIbRequest* req) {
    struct ibv_send_wr wr;
@@ -618,7 +669,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    req->recv.sizes = comm->sizesFifo[slot];
    for (int i=0; i<n; i++) req->recv.sizes[i] = 0;
 -  struct ncclIbSendFifo* localElem = comm->remFifo.elems[slot];
-+  if (rcclCtsInlineData) {
++  if (comm->useCtsInlineData) {
 +    localElemCtsInline = comm->remFifo.elems_cts_inline[slot];
 +  } else {
 +    localElem = comm->remFifo.elems[slot];
@@ -641,7 +692,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    for (int i=0; i<n; i++) {
 -    localElem[i].addr = (uint64_t)data[i];
      struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandles[i];
-+    if (rcclCtsInlineData) {
++    if (comm->useCtsInlineData) {
 +      localElemCtsInline[i].addr = (uint64_t)data[i];
 +
 +      // Send all applicable rkeys
@@ -675,17 +726,22 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
 +      localElem[i].idx = comm->remFifo.fifoTail+1;
 +      localElemRef = (uint64_t)localElem;
 +    }
++  }
++  if (comm->useCtsInlineData) {
++    wr.wr.rdma.remote_addr = comm->remFifo.addr + slot*NCCL_NET_IB_MAX_RECVS*sizeof(struct ncclIbSendFifoCtsInline);
++  } else {
++    wr.wr.rdma.remote_addr = comm->remFifo.addr + slot*NCCL_NET_IB_MAX_RECVS*sizeof(struct ncclIbSendFifo);
    }
-   wr.wr.rdma.remote_addr = comm->remFifo.addr + slot*NCCL_NET_IB_MAX_RECVS*sizeof(struct ncclIbSendFifo);
+-  wr.wr.rdma.remote_addr = comm->remFifo.addr + slot*NCCL_NET_IB_MAX_RECVS*sizeof(struct ncclIbSendFifo);
  
-@@ -2592,8 +2813,12 @@ ncclResult_t ncclIbPostFifo(struct ncclI
+   // Lookup the correct fifoRkey
    wr.wr.rdma.rkey = comm->base.remDevs[ctsQp->remDevIdx].fifoRkey;
  
    // Set the correct sge properties
 -  comm->devs[ctsQp->devIndex].fifoSge.addr   = (uint64_t)localElem;
 -  comm->devs[ctsQp->devIndex].fifoSge.length = n*sizeof(struct ncclIbSendFifo);
 +  comm->devs[ctsQp->devIndex].fifoSge.addr   = localElemRef;
-+  if (rcclCtsInlineData) {
++  if (comm->useCtsInlineData) {
 +    comm->devs[ctsQp->devIndex].fifoSge.length = MAX_INLINE_DATA_SIZE;
 +  } else {
 +    comm->devs[ctsQp->devIndex].fifoSge.length = n*sizeof(struct ncclIbSendFifo);
@@ -693,7 +749,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    wr.sg_list = &comm->devs[ctsQp->devIndex].fifoSge;
    wr.num_sge = 1;
  
-@@ -2623,7 +2848,14 @@ ncclResult_t ncclIbPostFifo(struct ncclI
+@@ -2645,7 +2901,14 @@
    //
    // slot == devIndex - When writing to fifo slot N, and this QP lives on device index N, it should send signalled.
    // This works out that each fifo posting QP gets drained
@@ -709,7 +765,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
      wr.send_flags |= IBV_SEND_SIGNALED;
      wr.wr_id = req - comm->base.reqs;
      ncclIbAddEvent(req, ctsQp->devIndex, &comm->devs[ctsQp->devIndex].base);
-@@ -2644,10 +2876,16 @@ ncclResult_t ncclIbPostFifo(struct ncclI
+@@ -2666,10 +2929,16 @@
  
    comm->remFifo.fifoTail++;
  
@@ -726,7 +782,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    struct ncclIbRecvComm* comm = (struct ncclIbRecvComm*)recvComm;
    ncclResult_t ret = ncclSuccess;
    struct ncclIbRequest* req = NULL;
-@@ -2663,6 +2901,11 @@ ncclResult_t ncclIbIrecv(void* recvComm,
+@@ -2685,6 +2954,11 @@
    if (n > NCCL_NET_IB_MAX_RECVS) return ncclInternalError;
    NCCLCHECKGOTO(ncclIbStatsCheckFatalCount(&comm->base.stats,__func__), ret, fail);
  
@@ -738,7 +794,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
    NCCLCHECKGOTO(ncclIbGetRequest(&comm->base, &req), ret, fail);
    req->type = NCCL_NET_IB_REQ_RECV;
    req->sock = &comm->base.sock;
-@@ -2675,40 +2918,50 @@ ncclResult_t ncclIbIrecv(void* recvComm,
+@@ -2697,40 +2971,50 @@
      req->devBases[i] = &comm->devs[i].base;
    }
  
@@ -819,7 +875,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  
    // Post to FIFO to notify sender
    TIME_START(2);
-@@ -2832,6 +3085,8 @@ static int getReqQpIndex(struct ncclIbRe
+@@ -2854,6 +3138,8 @@
  }
  #endif
  
@@ -828,7 +884,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
    struct ncclIbRequest *r = (struct ncclIbRequest*)request;
    ncclResult_t ret = ncclSuccess;
-@@ -2875,13 +3130,17 @@ ncclResult_t ncclIbTest(void* request, i
+@@ -2897,13 +3183,17 @@
  
      int totalWrDone = 0;
      int wrDone = 0;
@@ -848,7 +904,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
          if (ret != ncclSuccess) {
            failDevIdx = i;
            goto fail;
-@@ -3058,7 +3317,7 @@ ncclResult_t rcclNetP2pPolicy(void* hand
+@@ -3080,7 +3370,7 @@
  }
  
  ncclNet_t ncclNetIb = {
