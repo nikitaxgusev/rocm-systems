@@ -22,29 +22,36 @@
 // Counter registry
 // =====================================================================
 
+// Bug: the original bnxt_re counter names in the registry did not match
+// actual hw_counters filenames exposed by the bnxt_re driver (Thor2):
+//   canonical "rx_cnp_pkts" -> real file "rp_cnp_handled"   (was always 0)
+//   canonical "tx_cnp_pkts" -> real file "np_cnp_sent"      (was always 0)
+// The four DEBUGFS error counters require root on Thor2 (always 0 without it);
+// their equivalents are available in ports/1/hw_counters/ under different names.
+// bnxt_key provides the actual filename; NULL means the canonical name is correct.
 struct CounterRegistryEntry {
-  const char*   name;
-  CounterSource source;
-  bool          is_prefix;
+  const char*   name;      // canonical counter name (shown in table)
+  const char*   bnxt_key;  // actual hw_counters filename on bnxt_re (NULL = same as name)
+  CounterSource source;    // collection source
+  bool          is_prefix; // prefix match: expands to name0..name7
 };
 
 static const CounterRegistryEntry counter_registry[] = {
-  // ethtool – PFC frame counters (prefix → expands to name0..name7)
-  {"rx_pfc_ena_frames_pri",   COUNTER_SRC_ETHTOOL,  true},
-  {"tx_pfc_ena_frames_pri",   COUNTER_SRC_ETHTOOL,  true},
-  // ethtool – PFC transition counters (exact)
-  {"pfc_pri3_rx_transitions", COUNTER_SRC_ETHTOOL,  false},
-  {"pfc_pri3_tx_transitions", COUNTER_SRC_ETHTOOL,  false},
-  // IB hw_counters
-  {"rx_cnp_pkts",             COUNTER_SRC_IB_HW,    false},
-  {"tx_cnp_pkts",             COUNTER_SRC_IB_HW,    false},
-  {"rx_roce_discards",        COUNTER_SRC_IB_HW,    false},
-  // debugfs (bnxt_re info)
-  {"rx_stat_discards",        COUNTER_SRC_DEBUGFS,   false},
-  {"to_retransmits",          COUNTER_SRC_DEBUGFS,   false},
-  {"max_retry_exceeded",      COUNTER_SRC_DEBUGFS,   false},
-  {"oos_drop_count",          COUNTER_SRC_DEBUGFS,   false},
-  {"seq_err_naks_rcvd",       COUNTER_SRC_DEBUGFS,   false},
+  // ethtool – PFC (bnxt_re ethtool names match canonical)
+  {"rx_pfc_ena_frames_pri",   NULL,               COUNTER_SRC_ETHTOOL, true },
+  {"tx_pfc_ena_frames_pri",   NULL,               COUNTER_SRC_ETHTOOL, true },
+  {"pfc_pri3_rx_transitions", NULL,               COUNTER_SRC_ETHTOOL, false},
+  {"pfc_pri3_tx_transitions", NULL,               COUNTER_SRC_ETHTOOL, false},
+  // IB hw_counters – bnxt_re filenames differ from canonical names
+  {"rx_cnp_pkts",             "rp_cnp_handled",   COUNTER_SRC_IB_HW,   false},
+  {"tx_cnp_pkts",             "np_cnp_sent",      COUNTER_SRC_IB_HW,   false},
+  {"rx_roce_discards",        NULL,               COUNTER_SRC_IB_HW,   false},
+  // Error counters: moved from root-only DEBUGFS to IB hw_counters
+  {"rx_stat_discards",        "rx_roce_errors",   COUNTER_SRC_IB_HW,   false},
+  {"to_retransmits",          "roce_adp_retrans", COUNTER_SRC_IB_HW,   false},
+  {"max_retry_exceeded",      NULL,               COUNTER_SRC_IB_HW,   false},
+  {"oos_drop_count",          "out_of_buffer",    COUNTER_SRC_IB_HW,   false},
+  {"seq_err_naks_rcvd",       "out_of_sequence",  COUNTER_SRC_IB_HW,   false},
 };
 
 static const int counter_registry_size =
@@ -226,19 +233,36 @@ void NetCounterGetNetworkInterfaces(std::vector<std::string>& interfaces) {
 // Per-source collection
 // =====================================================================
 
+// Resolve the actual hw_counters filename for a counter on bnxt_re.
+// Without this, reading "rx_cnp_pkts" from hw_counters opens a nonexistent
+// file and silently returns 0; the real bnxt_re filename is "rp_cnp_handled".
+static void ResolveKey(const CounterDescriptor& d,
+                       const char*& key, CounterSource& src, bool& pfx) {
+  const CounterRegistryEntry* entry = FindInRegistry(d.name);
+  if (entry) {
+    key = entry->bnxt_key ? entry->bnxt_key : entry->name;
+    src = entry->source;
+    pfx = entry->is_prefix;
+  } else {
+    key = d.name.c_str();
+    src = d.source;
+    pfx = d.is_prefix;
+  }
+}
+
 static void CollectEthtoolCounters(const std::string& nic,
                                    const std::vector<CounterDescriptor>& selected,
                                    std::map<std::string, uint64_t>& out) {
   std::set<std::string> exact;
+  std::map<std::string,std::string> exact_canon;
   std::vector<std::string> prefixes;
+  std::map<std::string,std::string> pfx_canon;
   for (const auto& d : selected) {
-    if (d.source != COUNTER_SRC_ETHTOOL) { continue; }
-
-    if (d.is_prefix) {
-      prefixes.push_back(d.name);
-    } else {
-      exact.insert(d.name);
-    }
+    const char* key = d.name.c_str(); CounterSource src = d.source; bool pfx = d.is_prefix;
+    ResolveKey(d, key, src, pfx);
+    if (src != COUNTER_SRC_ETHTOOL) { continue; }
+    if (pfx) { prefixes.push_back(key); pfx_canon[key] = d.name; }
+    else      { exact.insert(key);      exact_canon[key] = d.name; }
   }
   if (exact.empty() && prefixes.empty()) { return; }
 
@@ -256,9 +280,9 @@ static void CollectEthtoolCounters(const std::string& nic,
       char* start = key;
       while (*start == ' ' || *start == '\t') { start++; }
       std::string k(start);
-      if (exact.count(k)) { out[k] = value; continue; }
+      if (exact.count(k)) { out[exact_canon[k]] = value; continue; }
       for (const auto& pfx : prefixes) {
-        if (k.compare(0, pfx.size(), pfx) == 0) { out[k] = value; break; }
+        if (k.compare(0, pfx.size(), pfx) == 0) { out[pfx_canon[pfx] + k.substr(pfx.size())] = value; break; }
       }
     }
   }
@@ -274,14 +298,13 @@ static void CollectIbHwCounters(const std::string& ib_device,
       "/sys/class/infiniband/" + ib_device + "/ports/1/hw_counters/";
 
   for (const auto& d : selected) {
-    if (d.source != COUNTER_SRC_IB_HW) { continue; }
-    std::string path = base + d.name;
-    FILE* fp = fopen(path.c_str(), "r");
+    const char* key = d.name.c_str(); CounterSource src = d.source; bool pfx = d.is_prefix;
+    ResolveKey(d, key, src, pfx);
+    if (src != COUNTER_SRC_IB_HW) { continue; }
+    FILE* fp = fopen((base + key).c_str(), "r");
     if (fp) {
       uint64_t value = 0;
-      if (fscanf(fp, "%lu", &value) == 1) {
-        out[d.name] = value;
-      }
+      if (fscanf(fp, "%lu", &value) == 1) { out[d.name] = value; }
       fclose(fp);
     }
   }
