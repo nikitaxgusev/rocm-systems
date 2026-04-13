@@ -1153,20 +1153,16 @@ NetworkCounterContext NetCounterCollectBefore(struct threadArgs* args) {
       ctx.nic_names.push_back(NetCounterFindNicForIbDevice(ib));
     }
   } else {
-    NetCounterGetNetworkInterfaces(ctx.nic_names);
-    if (ctx.nic_names.empty()) { ctx.nic_names.push_back("eth0"); }
-    ctx.ib_names.resize(ctx.nic_names.size());
-    for (size_t i = 0; i < ctx.nic_names.size(); i++) {
-      ctx.ib_names[i] = NetCounterFindIbDeviceForNic(ctx.nic_names[i]);
+    std::vector<std::string> all_nics;
+    NetCounterGetNetworkInterfaces(all_nics);
+    for (const auto& nic : all_nics) {
+      std::string ib = NetCounterFindIbDeviceForNic(nic);
+      if (ib.empty()) continue;
+      ctx.nic_names.push_back(nic);
+      ctx.ib_names.push_back(ib);
     }
+    if (ctx.nic_names.empty()) { ctx.nic_names.push_back("eth0"); ctx.ib_names.push_back(""); }
   }
-
-  // Detect NIC type from the first IB device and filter counter list
-  NicType nic_type = NIC_UNKNOWN;
-  for (size_t i = 0; i < ctx.ib_names.size() && nic_type == NIC_UNKNOWN; i++) {
-    nic_type = NetCounterDetectNicType(ctx.ib_names[i]);
-  }
-  NetCounterFilterByNicType(nic_type, ctx.selected_counters);
 
   size_t ndevs = ctx.nic_names.size();
   ctx.snapshots_before.resize(ndevs);
@@ -1175,6 +1171,9 @@ NetworkCounterContext NetCounterCollectBefore(struct threadArgs* args) {
         NetCounterCollectSnapshot(ctx.nic_names[i], ctx.ib_names[i],
                                   ctx.selected_counters);
   }
+
+  ctx.selected_counters =
+      NetCounterFilterByNicType(ctx.selected_counters, ctx.snapshots_before);
 
   char hostname[256] = {0};
   gethostname(hostname, sizeof(hostname));
