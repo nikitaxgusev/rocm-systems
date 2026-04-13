@@ -21,39 +21,6 @@
 // =====================================================================
 // Counter registry
 // =====================================================================
-//
-// Network congestion monitoring — Thor2 (bnxt_re)
-// -----------------------------------------------------------------------
-// #  Requested Counter          Thor2 Counter Name(s)                Source
-// 1  Rx PFC rate                rx_pfc_ena_frames_pri[0-7]           ethtool
-// 2  Rx CNP rate                rx_cnp_pkts (file: rp_cnp_handled)   hw_counters
-// 3  Rx PFC duration            —                                    —
-// 4  Tx PFC rate                tx_pfc_ena_frames_pri[0-7]           ethtool
-// 5  Tx CNP rate                tx_cnp_pkts (file: np_cnp_sent)      hw_counters
-// 6  Tx PFC duration            —                                    —
-// 7  NIC buffer overflows       rx_stat_discards (file: rx_roce_errors) hw_counters
-// 8  Host RoCE discards         rx_roce_discards                     hw_counters
-// 9  Retransmits                to_retransmits (file: roce_adp_retrans) hw_counters
-// 10 Retry Exceeded             max_retry_exceeded                   hw_counters
-// 11 Out of sequence drops      oos_drop_count (file: out_of_buffer) hw_counters
-// 12 Sequence error NAKs        seq_err_naks_rcvd (file: out_of_sequence) hw_counters
-//
-// Network congestion monitoring — AINIC (ionic)
-// -----------------------------------------------------------------------
-// #  Requested Counter          AINIC Counter Name(s)                Source
-// 1  Rx PFC rate                frames_rx_pripause[0-7]              ethtool
-// 2  Rx CNP rate                rx_rdma_cnp_pkts                     hw_counters
-// 3  Rx PFC duration            rx_pripause_N_1us_count (N=0..7)     ethtool
-// 4  Tx PFC rate                frames_tx_pripause[0-7]              ethtool
-// 5  Tx CNP rate                tx_rdma_cnp_pkts                     hw_counters
-// 6  Tx PFC duration            tx_pripause_N_1us_count (N=0..7)     ethtool
-// 7  NIC buffer overflows       resp_rx_outof_buf                    hw_counters
-// 8  Host RoCE discards         rx_rdma_mtu_discard_pkts             hw_counters
-// 9  Retransmits                tx_rdma_ack_timeout                  hw_counters
-// 10 Retry Exceeded             req_tx_retry_excd_err                hw_counters
-// 11 Out of sequence drops      resp_rx_outouf_seq                   hw_counters
-// 12 Sequence error NAKs        req_rx_pkt_seq_err                   hw_counters
-//
 
 struct CounterRegistryEntry {
   const char*   name;         // canonical counter name (shown in table)
@@ -79,6 +46,11 @@ static const CounterRegistryEntry counter_registry[] = {
   {"max_retry_exceeded",      NULL,               COUNTER_SRC_IB_HW,   false, "req_tx_retry_excd_err",COUNTER_SRC_IB_HW},
   {"oos_drop_count",          "out_of_buffer",    COUNTER_SRC_IB_HW,   false, "resp_rx_outouf_seq",   COUNTER_SRC_IB_HW},
   {"seq_err_naks_rcvd",       "out_of_sequence",  COUNTER_SRC_IB_HW,   false, "req_rx_pkt_seq_err",   COUNTER_SRC_IB_HW},
+  // RDMA throughput – ionic (AINIC) only
+  {"tx_rdma_ucast_bytes",     NULL,               COUNTER_SRC_IB_HW,   false, "tx_rdma_ucast_bytes",  COUNTER_SRC_IB_HW},
+  {"rx_rdma_ucast_bytes",     NULL,               COUNTER_SRC_IB_HW,   false, "rx_rdma_ucast_bytes",  COUNTER_SRC_IB_HW},
+  {"tx_rdma_ucast_pkts",      NULL,               COUNTER_SRC_IB_HW,   false, "tx_rdma_ucast_pkts",   COUNTER_SRC_IB_HW},
+  {"rx_rdma_ucast_pkts",      NULL,               COUNTER_SRC_IB_HW,   false, "rx_rdma_ucast_pkts",   COUNTER_SRC_IB_HW},
 };
 
 static const int counter_registry_size =
@@ -104,8 +76,8 @@ NicType NetCounterDetectNicType(const std::string& ib_device) {
   ssize_t len = readlink(driver_path.c_str(), link, sizeof(link) - 1);
   if (len > 0) {
     link[len] = '\0';
-    if (strstr(link, "ionic"))   return NIC_IONIC;
-    if (strstr(link, "bnxt_re")) return NIC_BNXT_RE;
+    if (strstr(link, "ionic"))  return NIC_IONIC;
+    if (strstr(link, "bnxt"))   return NIC_BNXT_RE;
   }
   return NIC_UNKNOWN;
 }
@@ -120,6 +92,10 @@ void NetCounterFilterByNicType(
     const CounterRegistryEntry* entry = FindInRegistry(d.name);
     if (!entry) { filtered.push_back(d); continue; }
     if (nic_type == NIC_IONIC && entry->ionic_key == NULL) continue;
+    // ionic-only: has ionic_key but no distinct bnxt mapping (name == ionic_key)
+    if (nic_type == NIC_BNXT_RE && entry->ionic_key &&
+        entry->bnxt_key == NULL &&
+        strcmp(entry->name, entry->ionic_key) == 0) continue;
     filtered.push_back(d);
   }
   counters = filtered;
