@@ -64,7 +64,17 @@ struct NetworkCounterContext {
   bool enabled;
 };
 
+// NIC type (for choosing correct counter names / sources)
+enum NicType { NIC_UNKNOWN, NIC_BNXT_RE, NIC_IONIC };
+
 // ---- public API ---------------------------------------------------------
+
+// Detect NIC type from IB device driver symlink
+NicType NetCounterDetectNicType(const std::string& ib_device);
+
+// Filter counter list to only counters supported on the given NIC type
+void NetCounterFilterByNicType(NicType nic_type,
+                               std::vector<CounterDescriptor>& counters);
 
 // Check RCCL_TESTS_NET_COUNTER_ENABLE=1
 bool NetCounterIsEnabled();

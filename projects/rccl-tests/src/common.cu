@@ -1161,6 +1161,13 @@ NetworkCounterContext NetCounterCollectBefore(struct threadArgs* args) {
     }
   }
 
+  // Detect NIC type from the first IB device and filter counter list
+  NicType nic_type = NIC_UNKNOWN;
+  for (size_t i = 0; i < ctx.ib_names.size() && nic_type == NIC_UNKNOWN; i++) {
+    nic_type = NetCounterDetectNicType(ctx.ib_names[i]);
+  }
+  NetCounterFilterByNicType(nic_type, ctx.selected_counters);
+
   size_t ndevs = ctx.nic_names.size();
   ctx.snapshots_before.resize(ndevs);
   for (size_t i = 0; i < ndevs; i++) {
