@@ -51,6 +51,36 @@ void rcclTelemetryInit(void);
 void rcclTelemetryFlush(void);
 
 /*
+ * Bracketed-snapshot API (exported; dlopen/dlsym friendly).
+ *
+ * Lets an external application (e.g. rccl-tests loaded against or
+ * dlopen()-ing librccl.so) bracket a workload and get a JSON file
+ * whose counters/deltas describe only that interval.
+ *
+ * Typical use from a test:
+ *   dlopen("librccl.so.1", ...);
+ *   // ... ncclCommInitRank(...) -- registers devices in telemetry ...
+ *   rcclTelemetrySnapshotBegin();     // zero runtime stats + re-snapshot ethtool
+ *   // ... run collective(s) ...
+ *   rcclTelemetrySnapshotEnd("/tmp/mytest.json");  // collect + compute deltas + write JSON
+ *
+ * Notes:
+ *   - Both calls are no-ops when telemetry is disabled or no device has
+ *     been registered yet (so they are safe to call unconditionally).
+ *   - `output_path` may be NULL to write to the default location
+ *     (RcclTelemetryConfig::output_dir / rccl_telemetry_<host>_<pid>.json).
+ *   - Can be called multiple times (snapshot_begin / ... / snapshot_end)
+ *     for back-to-back intervals.
+ *   - Marked default-visibility so they resolve via dlsym() even when
+ *     librccl is built with -fvisibility=hidden.
+ */
+__attribute__((visibility("default")))
+void rcclTelemetrySnapshotBegin(void);
+
+__attribute__((visibility("default")))
+void rcclTelemetrySnapshotEnd(const char* output_path);
+
+/*
  * Configuration structure - populated from RCCL_TELEMETRY_CONFIG JSON file
  * or uses defaults if not specified
  */

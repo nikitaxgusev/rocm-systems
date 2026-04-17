@@ -459,6 +459,93 @@ void rcclTelemetryFlush(void) {
   fclose(fp);
 }
 
+/* ------------------------------------------------------------------ */
+/* Bracketed-snapshot API (exported)                                  */
+/*                                                                     */
+/* rcclTelemetrySnapshotBegin/End let an external caller bracket a    */
+/* workload and obtain a JSON describing only that interval. Begin    */
+/* resets runtime accumulators + re-takes the ethtool baseline; End   */
+/* collects current HW counters, computes deltas, and writes JSON.    */
+/* ------------------------------------------------------------------ */
+
+__attribute__((visibility("default")))
+void rcclTelemetrySnapshotBegin(void) {
+  if (!rcclTelemetryEnabled) return;
+
+  int num_devs = __atomic_load_n(&rcclTelemetryNumDevs, __ATOMIC_ACQUIRE);
+  if (num_devs > RCCL_TELEMETRY_MAX_DEVS) num_devs = RCCL_TELEMETRY_MAX_DEVS;
+
+  for (int i = 0; i < num_devs; i++) {
+    RcclDeviceStats* dev = &rcclTelemetryDevs[i];
+
+    __atomic_store_n(&dev->tx_bytes,      0, __ATOMIC_RELAXED);
+    __atomic_store_n(&dev->rx_bytes,      0, __ATOMIC_RELAXED);
+    __atomic_store_n(&dev->num_cq_errors, 0, __ATOMIC_RELAXED);
+
+    int nch = __atomic_load_n(&dev->num_channels, __ATOMIC_RELAXED);
+    if (nch > RCCL_TELEMETRY_MAX_CHANNELS) nch = RCCL_TELEMETRY_MAX_CHANNELS;
+    for (int c = 0; c < nch; c++) {
+      RcclChannelStats* ch = &dev->channels[c];
+      __atomic_store_n(&ch->num_wqe_sent,      0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ch->num_wqe_rcvd,      0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ch->num_wqe_completed, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ch->num_cts_sent,      0, __ATOMIC_RELAXED);
+
+      int nqp = __atomic_load_n(&ch->num_qps, __ATOMIC_RELAXED);
+      if (nqp > RCCL_TELEMETRY_MAX_QPS) nqp = RCCL_TELEMETRY_MAX_QPS;
+      for (int q = 0; q < nqp; q++) {
+        RcclQpStats* qp = &ch->qp[q];
+        __atomic_store_n(&qp->num_wqe_sent,          0, __ATOMIC_RELAXED);
+        __atomic_store_n(&qp->num_wqe_rcvd,          0, __ATOMIC_RELAXED);
+        __atomic_store_n(&qp->num_wqe_completed,     0, __ATOMIC_RELAXED);
+        __atomic_store_n(&qp->num_slot_miss,         0, __ATOMIC_RELAXED);
+        __atomic_store_n(&qp->wqe_completion_ns_min, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&qp->wqe_completion_ns_max, 0, __ATOMIC_RELAXED);
+        for (int b = 0; b < RCCL_TELEMETRY_HISTOGRAM_SIZE; b++)
+          __atomic_store_n(&qp->wqe_completion_histogram[b], 0, __ATOMIC_RELAXED);
+      }
+    }
+
+    /* Re-read ethtool baselines so the next SnapshotEnd's delta_* values
+     * describe only the current bracketed interval. */
+    rcclTelemetrySnapshotInit(dev);
+  }
+
+  /* Reset start_time so the JSON reflects the bracket, not process start. */
+  rcclTelemetryGetTimestamp(rcclTelemetryStartTime, sizeof(rcclTelemetryStartTime));
+}
+
+__attribute__((visibility("default")))
+void rcclTelemetrySnapshotEnd(const char* output_path) {
+  if (!rcclTelemetryEnabled) return;
+
+  int num_devs = __atomic_load_n(&rcclTelemetryNumDevs, __ATOMIC_ACQUIRE);
+  if (num_devs > RCCL_TELEMETRY_MAX_DEVS) num_devs = RCCL_TELEMETRY_MAX_DEVS;
+
+  for (int i = 0; i < num_devs; i++) {
+    rcclTelemetryCollectHwCounters(&rcclTelemetryDevs[i]);
+  }
+
+  char default_path[1024];
+  if (output_path == NULL || output_path[0] == '\0') {
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+      strncpy(hostname, "unknown", sizeof(hostname) - 1);
+      hostname[sizeof(hostname) - 1] = '\0';
+    }
+    snprintf(default_path, sizeof(default_path),
+             "%s/rccl_telemetry_%s_%d.json",
+             rcclTelemetryCfg.output_dir, hostname, (int)getpid());
+    output_path = default_path;
+  }
+
+  FILE* fp = fopen(output_path, "w");
+  if (fp == NULL) return;
+
+  rcclTelemetryWriteJson(fp);
+  fclose(fp);
+}
+
 int rcclTelemetryRegisterDevice(int device_id, const char* roce_device,
                                  const char* eth_device, const char* transport) {
   if (!rcclTelemetryEnabled) {
