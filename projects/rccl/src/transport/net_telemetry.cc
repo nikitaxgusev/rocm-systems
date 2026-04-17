@@ -49,7 +49,8 @@ enum RcclHwcSource {
 typedef struct {
   const char*        json_name;    /* key written to the JSON output */
   enum RcclHwcSource source;       /* where to read the counter from */
-  const char*        key;          /* source-specific identifier */
+  const char*        key;          /* primary source-specific identifier */
+  const char*        key_fallback; /* optional fallback if primary read is N/A */
 } RcclHwCounterDesc;
 
 typedef struct {
@@ -74,98 +75,102 @@ typedef struct {
   RcclDeltaPatterns        delta;
 } RcclHwConfig;
 
+/* Helpers for building counter tables without per-row boilerplate. */
+#define HWC(json, src, key)            { (json), (src), (key), NULL }
+#define HWC_FB(json, src, key, fb)     { (json), (src), (key), (fb) }
+
 /* ------------------------------------------------------------------ */
 /* AINIC (AMD / Pensando ionic driver)                                 */
 /* ------------------------------------------------------------------ */
 
 static const RcclHwCounterDesc rcclHwcAinic[] = {
   /* Shared / cross-driver counters */
-  { "rx_cnp_pkts",                 HWC_IB_SYSFS, "rx_rdma_cnp_pkts" },
-  { "tx_cnp_pkts",                 HWC_IB_SYSFS, "tx_rdma_cnp_pkts" },
-  { "rx_roce_discards",            HWC_IB_SYSFS, "rx_rdma_mtu_discard_pkts" },
-  { "pfc_rx_frames_total",         HWC_ETHTOOL,  "frames_rx_pripause" },
-  { "pfc_tx_frames_total",         HWC_ETHTOOL,  "frames_tx_pripause" },
-  { "hw_rx_dropped",               HWC_ETHTOOL,  "hw_rx_dropped" },
-  { "hw_tx_dropped",               HWC_ETHTOOL,  "hw_tx_dropped" },
-  { "rx_errors",                   HWC_ETHTOOL,  "hw_rx_over_errors" },
-  { "to_retransmits",              HWC_IB_SYSFS, "tx_rdma_ack_timeout" },
-  { "max_retry_exceeded",          HWC_IB_SYSFS, "req_tx_retry_excd_err" },
-  { "oos_drop_count",              HWC_IB_SYSFS, "resp_rx_outouf_seq" },
-  { "seq_err_naks_rcvd",           HWC_IB_SYSFS, "req_rx_pkt_seq_err" },
+  HWC("rx_cnp_pkts",                 HWC_IB_SYSFS, "rx_rdma_cnp_pkts"),
+  HWC("tx_cnp_pkts",                 HWC_IB_SYSFS, "tx_rdma_cnp_pkts"),
+  HWC("rx_roce_discards",            HWC_IB_SYSFS, "rx_rdma_mtu_discard_pkts"),
+  HWC("pfc_rx_frames_total",         HWC_ETHTOOL,  "frames_rx_pripause"),
+  HWC("pfc_tx_frames_total",         HWC_ETHTOOL,  "frames_tx_pripause"),
+  HWC("hw_rx_dropped",               HWC_ETHTOOL,  "hw_rx_dropped"),
+  HWC("hw_tx_dropped",               HWC_ETHTOOL,  "hw_tx_dropped"),
+  HWC("rx_errors",                   HWC_ETHTOOL,  "hw_rx_over_errors"),
+  HWC("to_retransmits",              HWC_IB_SYSFS, "tx_rdma_ack_timeout"),
+  HWC("max_retry_exceeded",          HWC_IB_SYSFS, "req_tx_retry_excd_err"),
+  HWC("oos_drop_count",              HWC_IB_SYSFS, "resp_rx_outouf_seq"),
+  HWC("seq_err_naks_rcvd",           HWC_IB_SYSFS, "req_rx_pkt_seq_err"),
 
   /* RDMA traffic counters */
-  { "tx_rdma_retx_pkts",           HWC_IB_SYSFS, "tx_rdma_retx_pkts" },
-  { "tx_rdma_retx_bytes",          HWC_IB_SYSFS, "tx_rdma_retx_bytes" },
-  { "tx_rdma_ack_timeout",         HWC_IB_SYSFS, "tx_rdma_ack_timeout" },
-  { "rx_rdma_ecn_pkts",            HWC_IB_SYSFS, "rx_rdma_ecn_pkts" },
-  { "rx_rdma_mtu_discard_pkts",    HWC_IB_SYSFS, "rx_rdma_mtu_discard_pkts" },
+  HWC("tx_rdma_retx_pkts",           HWC_IB_SYSFS, "tx_rdma_retx_pkts"),
+  HWC("tx_rdma_retx_bytes",          HWC_IB_SYSFS, "tx_rdma_retx_bytes"),
+  HWC("tx_rdma_ack_timeout",         HWC_IB_SYSFS, "tx_rdma_ack_timeout"),
+  HWC("rx_rdma_ecn_pkts",            HWC_IB_SYSFS, "rx_rdma_ecn_pkts"),
+  HWC("rx_rdma_mtu_discard_pkts",    HWC_IB_SYSFS, "rx_rdma_mtu_discard_pkts"),
 
   /* Requester errors (RX path) */
-  { "req_rx_pkt_seq_err",          HWC_IB_SYSFS, "req_rx_pkt_seq_err" },
-  { "req_rx_rnr_retry_err",        HWC_IB_SYSFS, "req_rx_rnr_retry_err" },
-  { "req_rx_rmt_acc_err",          HWC_IB_SYSFS, "req_rx_rmt_acc_err" },
-  { "req_rx_cqe_err",              HWC_IB_SYSFS, "req_rx_cqe_err" },
-  { "req_rx_dup_response",         HWC_IB_SYSFS, "req_rx_dup_response" },
+  HWC("req_rx_pkt_seq_err",          HWC_IB_SYSFS, "req_rx_pkt_seq_err"),
+  HWC("req_rx_rnr_retry_err",        HWC_IB_SYSFS, "req_rx_rnr_retry_err"),
+  HWC("req_rx_rmt_acc_err",          HWC_IB_SYSFS, "req_rx_rmt_acc_err"),
+  HWC("req_rx_cqe_err",              HWC_IB_SYSFS, "req_rx_cqe_err"),
+  HWC("req_rx_dup_response",         HWC_IB_SYSFS, "req_rx_dup_response"),
 
   /* Requester errors (TX path) */
-  { "req_tx_retry_excd_err",       HWC_IB_SYSFS, "req_tx_retry_excd_err" },
-  { "req_tx_loc_oper_err",         HWC_IB_SYSFS, "req_tx_loc_oper_err" },
+  HWC("req_tx_retry_excd_err",       HWC_IB_SYSFS, "req_tx_retry_excd_err"),
+  HWC("req_tx_loc_oper_err",         HWC_IB_SYSFS, "req_tx_loc_oper_err"),
 
   /* Responder errors (RX path) */
-  { "resp_rx_dup_request",         HWC_IB_SYSFS, "resp_rx_dup_request" },
-  { "resp_rx_outof_buf",           HWC_IB_SYSFS, "resp_rx_outof_buf" },
-  { "resp_rx_outouf_seq",          HWC_IB_SYSFS, "resp_rx_outouf_seq" },
-  { "resp_rx_cqe_err",             HWC_IB_SYSFS, "resp_rx_cqe_err" },
+  HWC("resp_rx_dup_request",         HWC_IB_SYSFS, "resp_rx_dup_request"),
+  HWC("resp_rx_outof_buf",           HWC_IB_SYSFS, "resp_rx_outof_buf"),
+  HWC("resp_rx_outouf_seq",          HWC_IB_SYSFS, "resp_rx_outouf_seq"),
+  HWC("resp_rx_cqe_err",             HWC_IB_SYSFS, "resp_rx_cqe_err"),
 
   /* Responder errors (TX path) */
-  { "resp_tx_rnr_retry_err",       HWC_IB_SYSFS, "resp_tx_rnr_retry_err" },
+  HWC("resp_tx_rnr_retry_err",       HWC_IB_SYSFS, "resp_tx_rnr_retry_err"),
 
   /* RDMA traffic — unicast/multicast */
-  { "tx_rdma_ucast_bytes",         HWC_IB_SYSFS, "tx_rdma_ucast_bytes" },
-  { "tx_rdma_ucast_pkts",          HWC_IB_SYSFS, "tx_rdma_ucast_pkts" },
-  { "tx_rdma_mcast_bytes",         HWC_IB_SYSFS, "tx_rdma_mcast_bytes" },
-  { "tx_rdma_mcast_pkts",          HWC_IB_SYSFS, "tx_rdma_mcast_pkts" },
-  { "rx_rdma_ucast_bytes",         HWC_IB_SYSFS, "rx_rdma_ucast_bytes" },
-  { "rx_rdma_ucast_pkts",          HWC_IB_SYSFS, "rx_rdma_ucast_pkts" },
-  { "rx_rdma_mcast_bytes",         HWC_IB_SYSFS, "rx_rdma_mcast_bytes" },
-  { "rx_rdma_mcast_pkts",          HWC_IB_SYSFS, "rx_rdma_mcast_pkts" },
+  HWC("tx_rdma_ucast_bytes",         HWC_IB_SYSFS, "tx_rdma_ucast_bytes"),
+  HWC("tx_rdma_ucast_pkts",          HWC_IB_SYSFS, "tx_rdma_ucast_pkts"),
+  HWC("tx_rdma_mcast_bytes",         HWC_IB_SYSFS, "tx_rdma_mcast_bytes"),
+  HWC("tx_rdma_mcast_pkts",          HWC_IB_SYSFS, "tx_rdma_mcast_pkts"),
+  HWC("rx_rdma_ucast_bytes",         HWC_IB_SYSFS, "rx_rdma_ucast_bytes"),
+  HWC("rx_rdma_ucast_pkts",          HWC_IB_SYSFS, "rx_rdma_ucast_pkts"),
+  HWC("rx_rdma_mcast_bytes",         HWC_IB_SYSFS, "rx_rdma_mcast_bytes"),
+  HWC("rx_rdma_mcast_pkts",          HWC_IB_SYSFS, "rx_rdma_mcast_pkts"),
 
   /* CCL/CTS traffic (FW-dependent) */
-  { "tx_rdma_ccl_cts_bytes",       HWC_IB_SYSFS, "tx_rdma_ccl_cts_bytes" },
-  { "tx_rdma_ccl_cts_pkts",        HWC_IB_SYSFS, "tx_rdma_ccl_cts_pkts" },
-  { "tx_rdma_ccl_cts_retx_bytes",  HWC_IB_SYSFS, "tx_rdma_ccl_cts_retx_bytes" },
-  { "tx_rdma_ccl_cts_retx_pkts",   HWC_IB_SYSFS, "tx_rdma_ccl_cts_retx_pkts" },
-  { "tx_rdma_ccl_cts_ack_timeout", HWC_IB_SYSFS, "tx_rdma_ccl_cts_ack_timeout" },
-  { "rx_rdma_ccl_cts_bytes",       HWC_IB_SYSFS, "rx_rdma_ccl_cts_bytes" },
-  { "rx_rdma_ccl_cts_pkts",        HWC_IB_SYSFS, "rx_rdma_ccl_cts_pkts" },
+  HWC("tx_rdma_ccl_cts_bytes",       HWC_IB_SYSFS, "tx_rdma_ccl_cts_bytes"),
+  HWC("tx_rdma_ccl_cts_pkts",        HWC_IB_SYSFS, "tx_rdma_ccl_cts_pkts"),
+  HWC("tx_rdma_ccl_cts_retx_bytes",  HWC_IB_SYSFS, "tx_rdma_ccl_cts_retx_bytes"),
+  HWC("tx_rdma_ccl_cts_retx_pkts",   HWC_IB_SYSFS, "tx_rdma_ccl_cts_retx_pkts"),
+  HWC("tx_rdma_ccl_cts_ack_timeout", HWC_IB_SYSFS, "tx_rdma_ccl_cts_ack_timeout"),
+  HWC("rx_rdma_ccl_cts_bytes",       HWC_IB_SYSFS, "rx_rdma_ccl_cts_bytes"),
+  HWC("rx_rdma_ccl_cts_pkts",        HWC_IB_SYSFS, "rx_rdma_ccl_cts_pkts"),
 
   /* Requester errors — additional RX */
-  { "req_rx_rmt_req_err",          HWC_IB_SYSFS, "req_rx_rmt_req_err" },
-  { "req_rx_oper_err",             HWC_IB_SYSFS, "req_rx_oper_err" },
-  { "req_rx_impl_nak_seq_err",     HWC_IB_SYSFS, "req_rx_impl_nak_seq_err" },
-  { "req_rx_cqe_flush",            HWC_IB_SYSFS, "req_rx_cqe_flush" },
-  { "req_rx_inval_pkts",           HWC_IB_SYSFS, "req_rx_inval_pkts" },
+  HWC("req_rx_rmt_req_err",          HWC_IB_SYSFS, "req_rx_rmt_req_err"),
+  HWC("req_rx_oper_err",             HWC_IB_SYSFS, "req_rx_oper_err"),
+  HWC("req_rx_impl_nak_seq_err",     HWC_IB_SYSFS, "req_rx_impl_nak_seq_err"),
+  HWC("req_rx_cqe_flush",            HWC_IB_SYSFS, "req_rx_cqe_flush"),
+  HWC("req_rx_inval_pkts",           HWC_IB_SYSFS, "req_rx_inval_pkts"),
 
   /* Requester errors — additional TX */
-  { "req_tx_loc_acc_err",          HWC_IB_SYSFS, "req_tx_loc_acc_err" },
-  { "req_tx_mem_mgmt_err",         HWC_IB_SYSFS, "req_tx_mem_mgmt_err" },
-  { "req_tx_loc_sgl_inv_err",      HWC_IB_SYSFS, "req_tx_loc_sgl_inv_err" },
+  HWC("req_tx_loc_acc_err",          HWC_IB_SYSFS, "req_tx_loc_acc_err"),
+  HWC("req_tx_mem_mgmt_err",         HWC_IB_SYSFS, "req_tx_mem_mgmt_err"),
+  HWC("req_tx_loc_sgl_inv_err",      HWC_IB_SYSFS, "req_tx_loc_sgl_inv_err"),
 
   /* Responder errors — additional RX */
-  { "resp_rx_cqe_flush",           HWC_IB_SYSFS, "resp_rx_cqe_flush" },
-  { "resp_rx_loc_len_err",         HWC_IB_SYSFS, "resp_rx_loc_len_err" },
-  { "resp_rx_inval_request",       HWC_IB_SYSFS, "resp_rx_inval_request" },
-  { "resp_rx_loc_oper_err",        HWC_IB_SYSFS, "resp_rx_loc_oper_err" },
-  { "resp_rx_outof_atomic",        HWC_IB_SYSFS, "resp_rx_outof_atomic" },
-  { "resp_rx_ccl_cts_outouf_seq",  HWC_IB_SYSFS, "resp_rx_ccl_cts_outouf_seq" },
-  { "resp_rx_s0_table_err",        HWC_IB_SYSFS, "resp_rx_s0_table_err" },
+  HWC("resp_rx_cqe_flush",           HWC_IB_SYSFS, "resp_rx_cqe_flush"),
+  HWC("resp_rx_loc_len_err",         HWC_IB_SYSFS, "resp_rx_loc_len_err"),
+  HWC("resp_rx_inval_request",       HWC_IB_SYSFS, "resp_rx_inval_request"),
+  HWC("resp_rx_loc_oper_err",        HWC_IB_SYSFS, "resp_rx_loc_oper_err"),
+  HWC("resp_rx_outof_atomic",        HWC_IB_SYSFS, "resp_rx_outof_atomic"),
+  HWC("resp_rx_ccl_cts_outouf_seq",  HWC_IB_SYSFS, "resp_rx_ccl_cts_outouf_seq"),
+  HWC("resp_rx_s0_table_err",        HWC_IB_SYSFS, "resp_rx_s0_table_err"),
 
   /* Responder errors — additional TX */
-  { "resp_tx_pkt_seq_err",         HWC_IB_SYSFS, "resp_tx_pkt_seq_err" },
-  { "resp_tx_rmt_inval_req_err",   HWC_IB_SYSFS, "resp_tx_rmt_inval_req_err" },
-  { "resp_tx_rmt_acc_err",         HWC_IB_SYSFS, "resp_tx_rmt_acc_err" },
-  { "resp_tx_rmt_oper_err",        HWC_IB_SYSFS, "resp_tx_rmt_oper_err" },
-  { "resp_tx_loc_sgl_inv_err",     HWC_IB_SYSFS, "resp_tx_loc_sgl_inv_err" },
+  HWC("resp_tx_pkt_seq_err",         HWC_IB_SYSFS, "resp_tx_pkt_seq_err"),
+  HWC("resp_tx_rmt_inval_req_err",   HWC_IB_SYSFS, "resp_tx_rmt_inval_req_err"),
+  HWC("resp_tx_rmt_acc_err",         HWC_IB_SYSFS, "resp_tx_rmt_acc_err"),
+  HWC("resp_tx_rmt_oper_err",        HWC_IB_SYSFS, "resp_tx_rmt_oper_err"),
+  HWC("resp_tx_loc_sgl_inv_err",     HWC_IB_SYSFS, "resp_tx_loc_sgl_inv_err"),
 };
 
 static const RcclHwConfig rcclHwConfigAinic = {
@@ -182,65 +187,71 @@ static const RcclHwConfig rcclHwConfigAinic = {
 /* ------------------------------------------------------------------ */
 
 static const RcclHwCounterDesc rcclHwcThor2[] = {
-  /* Shared / cross-driver counters */
-  { "rx_cnp_pkts",                 HWC_IB_SYSFS, "np_cnp_sent" },
-  { "tx_cnp_pkts",                 HWC_IB_SYSFS, "rp_cnp_handled" },
-  { "rx_roce_discards",            HWC_IB_SYSFS, "rx_roce_discards" },
-  { "pfc_rx_frames_total",         HWC_ETHTOOL,  "pfc_pri3_rx_transitions" },
-  { "pfc_tx_frames_total",         HWC_ETHTOOL,  "pfc_pri3_tx_transitions" },
-  { "hw_rx_dropped",               HWC_ETHTOOL,  "rx_stat_discard" },
-  { "hw_tx_dropped",               HWC_IB_SYSFS, "tx_roce_discards" },
-  { "rx_errors",                   HWC_IB_SYSFS, "rx_roce_errors" },
-  { "to_retransmits",              HWC_IB_SYSFS, "roce_adp_retrans" },
-  { "max_retry_exceeded",          HWC_IB_SYSFS, "max_retry_exceeded" },
-  { "oos_drop_count",              HWC_IB_SYSFS, "out_of_sequence" },
-  { "seq_err_naks_rcvd",           HWC_IB_SYSFS, "packet_seq_err" },
+  /* Shared / cross-driver counters.
+   *
+   * CNP counters: newer Thor2 firmwares expose rx_cnp_pkts / tx_cnp_pkts
+   * directly; older firmwares only expose the RoCEv2 congestion-control
+   * state counters (rp_cnp_handled = reaction point received a CNP → "CNP Rx",
+   * np_cnp_sent = notification point sent a CNP → "CNP Tx"). Try the
+   * newer names first and fall back to the older ones. */
+  HWC_FB("rx_cnp_pkts",              HWC_IB_SYSFS, "rx_cnp_pkts", "rp_cnp_handled"),
+  HWC_FB("tx_cnp_pkts",              HWC_IB_SYSFS, "tx_cnp_pkts", "np_cnp_sent"),
+  HWC("rx_roce_discards",            HWC_IB_SYSFS, "rx_roce_discards"),
+  HWC("pfc_rx_frames_total",         HWC_ETHTOOL,  "pfc_pri3_rx_transitions"),
+  HWC("pfc_tx_frames_total",         HWC_ETHTOOL,  "pfc_pri3_tx_transitions"),
+  HWC("hw_rx_dropped",               HWC_ETHTOOL,  "rx_stat_discard"),
+  HWC("hw_tx_dropped",               HWC_IB_SYSFS, "tx_roce_discards"),
+  HWC("rx_errors",                   HWC_IB_SYSFS, "rx_roce_errors"),
+  HWC("to_retransmits",              HWC_IB_SYSFS, "roce_adp_retrans"),
+  HWC("max_retry_exceeded",          HWC_IB_SYSFS, "max_retry_exceeded"),
+  HWC("oos_drop_count",              HWC_IB_SYSFS, "out_of_sequence"),
+  HWC("seq_err_naks_rcvd",           HWC_IB_SYSFS, "packet_seq_err"),
 
   /* RDMA traffic counters */
-  { "tx_rdma_retx_pkts",           HWC_IB_SYSFS, "roce_adp_retrans" },
-  { "tx_rdma_ack_timeout",         HWC_IB_SYSFS, "roce_adp_retrans_to" },
-  { "rx_rdma_ecn_pkts",            HWC_IB_SYSFS, "np_ecn_marked_roce_packets" },
+  HWC("tx_rdma_retx_pkts",           HWC_IB_SYSFS, "roce_adp_retrans"),
+  HWC("tx_rdma_ack_timeout",         HWC_IB_SYSFS, "roce_adp_retrans_to"),
+  HWC("rx_rdma_ecn_pkts",            HWC_IB_SYSFS, "np_ecn_marked_roce_packets"),
 
   /* Requester errors (RX path) */
-  { "req_rx_pkt_seq_err",          HWC_IB_SYSFS, "packet_seq_err" },
-  { "req_rx_rnr_retry_err",        HWC_IB_SYSFS, "rnr_nak_retry_err" },
-  { "req_rx_rmt_acc_err",          HWC_IB_SYSFS, "req_remote_access_errors" },
-  { "req_rx_cqe_err",              HWC_IB_SYSFS, "req_cqe_error" },
-  { "req_rx_dup_response",         HWC_IB_SYSFS, "bad_resp_err" },
+  HWC("req_rx_pkt_seq_err",          HWC_IB_SYSFS, "packet_seq_err"),
+  HWC("req_rx_rnr_retry_err",        HWC_IB_SYSFS, "rnr_nak_retry_err"),
+  HWC("req_rx_rmt_acc_err",          HWC_IB_SYSFS, "req_remote_access_errors"),
+  HWC("req_rx_cqe_err",              HWC_IB_SYSFS, "req_cqe_error"),
+  HWC("req_rx_dup_response",         HWC_IB_SYSFS, "bad_resp_err"),
 
   /* Requester errors (TX path) */
-  { "req_tx_retry_excd_err",       HWC_IB_SYSFS, "max_retry_exceeded" },
-  { "req_tx_loc_oper_err",         HWC_IB_SYSFS, "local_qp_op_err" },
+  HWC("req_tx_retry_excd_err",       HWC_IB_SYSFS, "max_retry_exceeded"),
+  HWC("req_tx_loc_oper_err",         HWC_IB_SYSFS, "local_qp_op_err"),
 
   /* Responder errors (RX path) */
-  { "resp_rx_dup_request",         HWC_IB_SYSFS, "duplicate_request" },
-  { "resp_rx_outof_buf",           HWC_IB_SYSFS, "out_of_buffer" },
-  { "resp_rx_outouf_seq",          HWC_IB_SYSFS, "out_of_sequence" },
-  { "resp_rx_cqe_err",             HWC_IB_SYSFS, "resp_cqe_error" },
+  HWC("resp_rx_dup_request",         HWC_IB_SYSFS, "duplicate_request"),
+  HWC("resp_rx_outof_buf",           HWC_IB_SYSFS, "out_of_buffer"),
+  HWC("resp_rx_outouf_seq",          HWC_IB_SYSFS, "out_of_sequence"),
+  HWC("resp_rx_cqe_err",             HWC_IB_SYSFS, "resp_cqe_error"),
 
   /* RDMA traffic — totals (no ucast/mcast split on bnxt_re) */
-  { "tx_rdma_ucast_bytes",         HWC_IB_SYSFS, "tx_bytes" },
-  { "tx_rdma_ucast_pkts",          HWC_IB_SYSFS, "tx_pkts" },
-  { "rx_rdma_ucast_bytes",         HWC_IB_SYSFS, "rx_bytes" },
-  { "rx_rdma_ucast_pkts",          HWC_IB_SYSFS, "rx_pkts" },
+  HWC("tx_rdma_ucast_bytes",         HWC_IB_SYSFS, "tx_bytes"),
+  HWC("tx_rdma_ucast_pkts",          HWC_IB_SYSFS, "tx_pkts"),
+  HWC("rx_rdma_ucast_bytes",         HWC_IB_SYSFS, "rx_bytes"),
+  HWC("rx_rdma_ucast_pkts",          HWC_IB_SYSFS, "rx_pkts"),
 
   /* Requester errors — additional RX */
-  { "req_rx_rmt_req_err",          HWC_IB_SYSFS, "req_remote_invalid_request" },
-  { "req_rx_impl_nak_seq_err",     HWC_IB_SYSFS, "implied_nak_seq_err" },
-  { "req_rx_cqe_flush",            HWC_IB_SYSFS, "req_cqe_flush_error" },
+  HWC("req_rx_rmt_req_err",          HWC_IB_SYSFS, "req_remote_invalid_request"),
+  HWC("req_rx_impl_nak_seq_err",     HWC_IB_SYSFS, "implied_nak_seq_err"),
+  HWC("req_rx_cqe_flush",            HWC_IB_SYSFS, "req_cqe_flush_error"),
 
   /* Requester errors — additional TX */
-  { "req_tx_loc_acc_err",          HWC_IB_SYSFS, "local_protection_err" },
-  { "req_tx_mem_mgmt_err",         HWC_IB_SYSFS, "mem_mgmt_op_err" },
+  HWC("req_tx_loc_acc_err",          HWC_IB_SYSFS, "local_protection_err"),
+  HWC("req_tx_mem_mgmt_err",         HWC_IB_SYSFS, "mem_mgmt_op_err"),
 
   /* Responder errors — additional RX */
-  { "resp_rx_cqe_flush",           HWC_IB_SYSFS, "resp_cqe_flush_error" },
-  { "resp_rx_loc_len_err",         HWC_IB_SYSFS, "resp_local_length_error" },
+  HWC("resp_rx_cqe_flush",           HWC_IB_SYSFS, "resp_cqe_flush_error"),
+  HWC("resp_rx_loc_len_err",         HWC_IB_SYSFS, "resp_local_length_error"),
 
   /* Responder errors — additional TX */
-  { "resp_tx_rmt_inval_req_err",   HWC_IB_SYSFS, "res_rem_inv_err" },
-  { "resp_tx_rmt_acc_err",         HWC_IB_SYSFS, "resp_remote_access_errors" },
-  { "resp_tx_rmt_oper_err",        HWC_IB_SYSFS, "remote_op_err" },
+  HWC("resp_tx_rmt_inval_req_err",   HWC_IB_SYSFS, "res_rem_inv_err"),
+  HWC("resp_tx_rmt_acc_err",         HWC_IB_SYSFS, "resp_remote_access_errors"),
+  HWC("resp_tx_rmt_oper_err",        HWC_IB_SYSFS, "remote_op_err"),
 };
 
 static const RcclHwConfig rcclHwConfigThor2 = {
@@ -761,12 +772,19 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
 
   const RcclHwConfig* hw = (const RcclHwConfig*)dev->hw_config;
 
-  /* 1. IB sysfs hw_counters (individual reads) */
+  /* 1. IB sysfs hw_counters (individual reads).
+   *    If the primary key read returns -1 (N/A) and a fallback key is
+   *    provided, try that too — lets us track counters whose kernel-side
+   *    name changed across firmware/driver revisions (e.g. Thor2 CNP). */
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
     if (d->source == HWC_IB_SYSFS && d->key != NULL) {
-      if (rcclTelemetryIsCounterEnabled(d->json_name))
-        dev->hw_counters[c] = rcclTelemetryReadHwCounter(dev->roce_device, d->key);
+      if (rcclTelemetryIsCounterEnabled(d->json_name)) {
+        int64_t v = rcclTelemetryReadHwCounter(dev->roce_device, d->key);
+        if (v < 0 && d->key_fallback != NULL)
+          v = rcclTelemetryReadHwCounter(dev->roce_device, d->key_fallback);
+        dev->hw_counters[c] = v;
+      }
     }
   }
 
@@ -774,13 +792,24 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
   RcclEthtoolWantedEx ew[RCCL_ETHTOOL_MAX_WANTED];
   int ew_n = 0;
 
-  /* 2a. Scalar hw_counters that use ETHTOOL */
+  /* 2a. Scalar hw_counters that use ETHTOOL.
+   *     Both the primary key and (if set) the fallback key are queued
+   *     with the same target pointer. The batch reader skips entries
+   *     whose target is already >= 0, so if the primary matches first
+   *     the fallback lookup is naturally short-circuited. */
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source == HWC_ETHTOOL && d->key != NULL &&
-        ew_n < RCCL_ETHTOOL_MAX_WANTED &&
-        rcclTelemetryIsCounterEnabled(d->json_name)) {
+    if (d->source != HWC_ETHTOOL || d->key == NULL) continue;
+    if (!rcclTelemetryIsCounterEnabled(d->json_name)) continue;
+
+    if (ew_n < RCCL_ETHTOOL_MAX_WANTED) {
       strncpy(ew[ew_n].key, d->key, 63);
+      ew[ew_n].key[63] = '\0';
+      ew[ew_n].target = &dev->hw_counters[c];
+      ew_n++;
+    }
+    if (d->key_fallback != NULL && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
+      strncpy(ew[ew_n].key, d->key_fallback, 63);
       ew[ew_n].key[63] = '\0';
       ew[ew_n].target = &dev->hw_counters[c];
       ew_n++;
