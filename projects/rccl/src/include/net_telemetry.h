@@ -23,6 +23,10 @@ extern "C" {
  *
  * Output: JSON file written on process exit to
  *   /tmp/rccl_telemetry_<hostname>_<pid>.json
+ *
+ * Supported hardware:
+ *   - AMD AINIC (driver: ionic)
+ *   - Broadcom Thor2 (driver: bnxt_re)
  */
 
 /* Maximum constants */
@@ -31,85 +35,11 @@ extern "C" {
 #define RCCL_TELEMETRY_MAX_QPS        128
 #define RCCL_TELEMETRY_HISTOGRAM_SIZE 16
 
-/* Hardware counter indices — canonical names stable across all hardware */
-enum {
-  RCCL_HWC_RX_CNP_PKTS = 0,
-  RCCL_HWC_TX_CNP_PKTS,
-  RCCL_HWC_RX_ROCE_DISCARDS,
-  RCCL_HWC_PFC_RX_FRAMES_TOTAL,
-  RCCL_HWC_PFC_TX_FRAMES_TOTAL,
-  RCCL_HWC_HW_RX_DROPPED,
-  RCCL_HWC_HW_TX_DROPPED,
-  RCCL_HWC_RX_ERRORS,
-  RCCL_HWC_TO_RETRANSMITS,
-  RCCL_HWC_MAX_RETRY_EXCEEDED,
-  RCCL_HWC_OOS_DROP_COUNT,
-  RCCL_HWC_SEQ_ERR_NAKS_RCVD,
-  /* Ionic-specific RDMA traffic counters */
-  RCCL_HWC_TX_RDMA_RETX_PKTS,
-  RCCL_HWC_TX_RDMA_RETX_BYTES,
-  RCCL_HWC_TX_RDMA_ACK_TIMEOUT,
-  RCCL_HWC_RX_RDMA_ECN_PKTS,
-  RCCL_HWC_RX_RDMA_MTU_DISCARD_PKTS,
-  /* Ionic requester error counters (RX path) */
-  RCCL_HWC_REQ_RX_PKT_SEQ_ERR,
-  RCCL_HWC_REQ_RX_RNR_RETRY_ERR,
-  RCCL_HWC_REQ_RX_RMT_ACC_ERR,
-  RCCL_HWC_REQ_RX_CQE_ERR,
-  RCCL_HWC_REQ_RX_DUP_RESPONSE,
-  /* Ionic requester error counters (TX path) */
-  RCCL_HWC_REQ_TX_RETRY_EXCD_ERR,
-  RCCL_HWC_REQ_TX_LOC_OPER_ERR,
-  /* Ionic responder error counters (RX path) */
-  RCCL_HWC_RESP_RX_DUP_REQUEST,
-  RCCL_HWC_RESP_RX_OUTOF_BUF,
-  RCCL_HWC_RESP_RX_OUTOUF_SEQ,
-  RCCL_HWC_RESP_RX_CQE_ERR,
-  /* Ionic responder error counters (TX path) */
-  RCCL_HWC_RESP_TX_RNR_RETRY_ERR,
-  /* Ionic RDMA traffic — unicast/multicast */
-  RCCL_HWC_TX_RDMA_UCAST_BYTES,
-  RCCL_HWC_TX_RDMA_UCAST_PKTS,
-  RCCL_HWC_TX_RDMA_MCAST_BYTES,
-  RCCL_HWC_TX_RDMA_MCAST_PKTS,
-  RCCL_HWC_RX_RDMA_UCAST_BYTES,
-  RCCL_HWC_RX_RDMA_UCAST_PKTS,
-  RCCL_HWC_RX_RDMA_MCAST_BYTES,
-  RCCL_HWC_RX_RDMA_MCAST_PKTS,
-  /* Ionic CCL/CTS traffic (FW-dependent) */
-  RCCL_HWC_TX_RDMA_CCL_CTS_BYTES,
-  RCCL_HWC_TX_RDMA_CCL_CTS_PKTS,
-  RCCL_HWC_TX_RDMA_CCL_CTS_RETX_BYTES,
-  RCCL_HWC_TX_RDMA_CCL_CTS_RETX_PKTS,
-  RCCL_HWC_TX_RDMA_CCL_CTS_ACK_TIMEOUT,
-  RCCL_HWC_RX_RDMA_CCL_CTS_BYTES,
-  RCCL_HWC_RX_RDMA_CCL_CTS_PKTS,
-  /* Ionic requester errors — additional RX */
-  RCCL_HWC_REQ_RX_RMT_REQ_ERR,
-  RCCL_HWC_REQ_RX_OPER_ERR,
-  RCCL_HWC_REQ_RX_IMPL_NAK_SEQ_ERR,
-  RCCL_HWC_REQ_RX_CQE_FLUSH,
-  RCCL_HWC_REQ_RX_INVAL_PKTS,
-  /* Ionic requester errors — additional TX */
-  RCCL_HWC_REQ_TX_LOC_ACC_ERR,
-  RCCL_HWC_REQ_TX_MEM_MGMT_ERR,
-  RCCL_HWC_REQ_TX_LOC_SGL_INV_ERR,
-  /* Ionic responder errors — additional RX */
-  RCCL_HWC_RESP_RX_CQE_FLUSH,
-  RCCL_HWC_RESP_RX_LOC_LEN_ERR,
-  RCCL_HWC_RESP_RX_INVAL_REQUEST,
-  RCCL_HWC_RESP_RX_LOC_OPER_ERR,
-  RCCL_HWC_RESP_RX_OUTOF_ATOMIC,
-  RCCL_HWC_RESP_RX_CCL_CTS_OUTOUF_SEQ,
-  RCCL_HWC_RESP_RX_S0_TABLE_ERR,
-  /* Ionic responder errors — additional TX */
-  RCCL_HWC_RESP_TX_PKT_SEQ_ERR,
-  RCCL_HWC_RESP_TX_RMT_INVAL_REQ_ERR,
-  RCCL_HWC_RESP_TX_RMT_ACC_ERR,
-  RCCL_HWC_RESP_TX_RMT_OPER_ERR,
-  RCCL_HWC_RESP_TX_LOC_SGL_INV_ERR,
-  RCCL_HWC_COUNT
-};
+/*
+ * Maximum number of scalar hardware counters stored per device.
+ * Must be >= the largest per-HW counter table size (see net_telemetry.cc).
+ */
+#define RCCL_TELEMETRY_MAX_HWC        80
 
 /* Runtime guard - 1 if telemetry is enabled, 0 otherwise */
 extern int rcclTelemetryEnabled;
@@ -163,14 +93,19 @@ typedef struct {
 } RcclChannelStats;
 
 /*
- * Per-device statistics including hardware counters
+ * Per-device statistics including hardware counters.
+ *
+ * The scalar hw_counters[] array is indexed by position in the active per-HW
+ * descriptor table (see net_telemetry.cc). `hw_config` is an opaque pointer to
+ * that table; consumers outside of net_telemetry.cc should not dereference it.
  */
 typedef struct {
   int    device_id;
   char   roce_device[64];
   char   eth_device[64];
   char   transport[32];       /* e.g., "IB-CAST", "IB" */
-  int    drv_col;             /* resolved driver column index into rcclHwcTable */
+
+  const void* hw_config;      /* opaque: points to active per-HW RcclHwConfig */
 
   uint64_t tx_bytes;
   uint64_t rx_bytes;
@@ -178,8 +113,9 @@ typedef struct {
   int      num_channels;
   RcclChannelStats channels[RCCL_TELEMETRY_MAX_CHANNELS];
 
-  /* Scalar hardware counters — filled at flush time, -1 means N/A */
-  int64_t hw_counters[RCCL_HWC_COUNT];
+  /* Scalar hardware counters — filled at flush time, -1 means N/A.
+   * Indexed by position in the active per-HW counter table. */
+  int64_t hw_counters[RCCL_TELEMETRY_MAX_HWC];
 
   /* Per-priority PFC counters (priorities 0-7), -1 if not supported */
   int64_t pfc_rx_frames[8];
@@ -272,22 +208,6 @@ int rcclTelemetryRegisterDevice(int device_id, const char* roce_device,
  * eth_device: output buffer (at least 64 bytes)
  */
 void rcclTelemetryGetEthDevice(const char* roce_device, char* eth_device, size_t eth_device_size);
-
-/*
- * Stats query API — callable by external plugins (e.g., ANP) via dlsym.
- * Safe to call from any thread, never blocks, never does I/O.
- * Returns zeros when telemetry is disabled.
- *
- * Expected field order (8 counters, aggregated per device):
- *   0: num_wqe_sent       5: tx_bytes
- *   1: num_wqe_rcvd       6: rx_bytes
- *   2: num_wqe_completed  7: num_cq_errors
- *   3: num_slot_miss
- *   4: num_cts_sent
- */
-#define RCCL_TELEMETRY_NUM_STATS 8
-int  rcclTelemetryGetStatNames(int* nstats, const char** names[]);
-int  rcclTelemetryGetStats(int dev, int* nstats, uint64_t stats[]);
 
 /* ------------------------------------------------------------------ */
 /* Hot-path telemetry inline functions                                 */
