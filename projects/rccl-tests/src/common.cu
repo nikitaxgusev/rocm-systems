@@ -39,6 +39,17 @@ size_t cache_bytes = 192 * 1024 * 1024; // Use 192MB
 rcclTestsGetAlgoInfo_t rcclTestsGetAlgoInfo = NULL;
 rcclTestsGetProtocolName_t rcclTestsGetProtocolName = NULL;
 rcclTestsGetAlgoName_t rcclTestsGetAlgoName= NULL;
+
+/* RCCL telemetry bracketed-snapshot API (resolved via dlsym below).
+ * When RCCL_TELEMETRY_SNAPSHOT_DIR is set, BenchTime() wraps the
+ * performance loop with these calls so each size gets its own JSON
+ * describing only the collective's contribution (hw_counters,
+ * delta_tx/rx_bytes, per-QP histograms, etc.). */
+typedef void (*rcclTelemetrySnapshotBegin_t)(void);
+typedef void (*rcclTelemetrySnapshotEnd_t)(const char* output_path);
+static rcclTelemetrySnapshotBegin_t rcclTelemetrySnapshotBeginFn = NULL;
+static rcclTelemetrySnapshotEnd_t   rcclTelemetrySnapshotEndFn   = NULL;
+
 static void loadRcclSyms() {
   static void* handle = NULL;
   const char* libname = "librccl.so";
@@ -52,6 +63,14 @@ static void loadRcclSyms() {
   rcclTestsGetAlgoInfo      = (rcclTestsGetAlgoInfo_t)     dlsym(handle, "rcclGetAlgoInfo");
   rcclTestsGetAlgoName      = (rcclTestsGetAlgoName_t)     dlsym(handle,  "rcclGetAlgoName");
   rcclTestsGetProtocolName  = (rcclTestsGetProtocolName_t) dlsym(handle,  "rcclGetProtocolName");
+  /* Telemetry snapshot API is optional — only present in builds of
+   * librccl.so that include the net_telemetry subsystem. Missing symbols
+   * are silently ignored (dlerror cleared by the next dlsym). */
+  rcclTelemetrySnapshotBeginFn =
+      (rcclTelemetrySnapshotBegin_t)dlsym(handle, "rcclTelemetrySnapshotBegin");
+  rcclTelemetrySnapshotEndFn =
+      (rcclTelemetrySnapshotEnd_t)  dlsym(handle, "rcclTelemetrySnapshotEnd");
+  (void)dlerror();
 }
 
 // RCCL_FLOAT8 support
@@ -797,6 +816,15 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
 
   Barrier(args);
 
+  /* RCCL telemetry bracket START (before benchmark loop).
+   * Enabled by setting RCCL_TELEMETRY_SNAPSHOT_DIR to an output dir.
+   * Zeroes runtime counters + re-takes ethtool baseline so the matching
+   * snapshot_end captures only this size's collective traffic. */
+  const char* telSnapDir = getenv("RCCL_TELEMETRY_SNAPSHOT_DIR");
+  if (telSnapDir != NULL && telSnapDir[0] != '\0' && rcclTelemetrySnapshotBeginFn != NULL) {
+    rcclTelemetrySnapshotBeginFn();
+  }
+
 #if HIP_VERSION >= 50221310
   std::vector<cudaGraph_t> graphs(args->nGpus);
   std::vector<cudaGraphExec_t> graphExec(args->nGpus);
@@ -880,6 +908,22 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
 
   double cputimeSec = tim.elapsed()/(iters*agg_iters);
   TESTCHECK(completeColl(args));
+
+  /* RCCL telemetry bracket END (after completeColl, before Allreduce of
+   * deltaSec). Writes one JSON per (size, in_place) tuple on each rank. */
+  if (telSnapDir != NULL && telSnapDir[0] != '\0' && rcclTelemetrySnapshotEndFn != NULL) {
+    char snapHost[128] = "unknown";
+    (void)gethostname(snapHost, sizeof(snapHost) - 1);
+    snapHost[sizeof(snapHost) - 1] = '\0';
+    for (char* p = snapHost; *p; ++p) if (*p == '/') *p = '_';
+
+    char snapPath[1024];
+    snprintf(snapPath, sizeof(snapPath),
+             "%s/rccl_snapshot_%s_pid%d_bytes%zu_%s.json",
+             telSnapDir, snapHost, (int)getpid(),
+             (size_t)args->nbytes, in_place ? "inplace" : "outofplace");
+    rcclTelemetrySnapshotEndFn(snapPath);
+  }
 
   double deltaSec = tim.elapsed();
   deltaSec = deltaSec/(iters*agg_iters);
