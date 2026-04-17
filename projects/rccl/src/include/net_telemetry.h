@@ -73,6 +73,27 @@ void rcclTelemetryFlush(void);
  *     for back-to-back intervals.
  *   - Marked default-visibility so they resolve via dlsym() even when
  *     librccl is built with -fvisibility=hidden.
+ *
+ * Conflict / concurrency model:
+ *   - Cross-process: fully isolated. Each process (each MPI rank, each
+ *     dlopen() site) has its own librccl instance with its own baselines;
+ *     snapshots from different processes never conflict. NIC-level
+ *     ethtool deltas (delta_tx_bytes/...) are inherently hardware-shared
+ *     across processes on the same NIC, while the runtime tx_bytes/
+ *     rx_bytes atomics are per-process and accurate for the bracket.
+ *   - Single-process, sequential brackets: fully supported
+ *     (Begin -> work -> End -> Begin -> work -> End ...).
+ *   - Single-process, concurrent brackets on different threads: the
+ *     implementation serializes Begin/End with an internal mutex, so the
+ *     baselines are never corrupted, but the brackets are effectively
+ *     forced sequential. If a thread calls Begin while another bracket
+ *     is already active, or End without a matching Begin, a one-line
+ *     warning is logged to stderr.
+ *   - Coexistence with application-level counter collectors (e.g.
+ *     rccl-tests' NetCounterCollectBefore/AfterAndPrint): fully
+ *     independent. The snapshot API manipulates librccl's own state;
+ *     application-level collectors read sysfs/ethtool directly. Both
+ *     can be enabled simultaneously.
  */
 __attribute__((visibility("default")))
 void rcclTelemetrySnapshotBegin(void);

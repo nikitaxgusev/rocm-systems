@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 /* Global telemetry state */
 int rcclTelemetryEnabled = 0;
@@ -26,6 +27,19 @@ int rcclTelemetryNumDevs = 0;
 static int rcclTelemetryInitialized = 0;
 static char rcclTelemetryStartTime[64];
 static char rcclTelemetryProcessName[256];
+
+/* Bracketed-snapshot serialization + simple state tracking.
+ *
+ * Per-process (each MPI rank / dlopen site has its own copy of these).
+ * Serializes concurrent rcclTelemetrySnapshotBegin/End calls so two
+ * threads in the same process cannot clobber the single set of baselines
+ * (snap_init_*) or rcclTelemetryStartTime. Also detects mis-pairing
+ * (Begin without End, End without Begin) and logs a one-line warning,
+ * which is cheap to read and avoids silent bad-data scenarios.
+ * Cross-process isolation is already provided by the OS; nothing needed
+ * here for that. */
+static pthread_mutex_t rcclTelemetrySnapshotMutex = PTHREAD_MUTEX_INITIALIZER;
+static int rcclTelemetrySnapshotActive = 0;  /* 0 = no bracket, 1 = inside */
 
 /* ================================================================== */
 /* Hardware-agnostic counter model                                     */
@@ -472,6 +486,17 @@ __attribute__((visibility("default")))
 void rcclTelemetrySnapshotBegin(void) {
   if (!rcclTelemetryEnabled) return;
 
+  /* Serialize with any other Begin/End in this process; detect mis-pair. */
+  pthread_mutex_lock(&rcclTelemetrySnapshotMutex);
+  if (rcclTelemetrySnapshotActive) {
+    fprintf(stderr,
+            "RCCL NET_TELEMETRY WARN: SnapshotBegin called while a previous "
+            "bracket is still active (pid=%d) — re-baselining anyway. "
+            "This usually means a matching SnapshotEnd was skipped.\n",
+            (int)getpid());
+  }
+  rcclTelemetrySnapshotActive = 1;
+
   int num_devs = __atomic_load_n(&rcclTelemetryNumDevs, __ATOMIC_ACQUIRE);
   if (num_devs > RCCL_TELEMETRY_MAX_DEVS) num_devs = RCCL_TELEMETRY_MAX_DEVS;
 
@@ -513,11 +538,23 @@ void rcclTelemetrySnapshotBegin(void) {
 
   /* Reset start_time so the JSON reflects the bracket, not process start. */
   rcclTelemetryGetTimestamp(rcclTelemetryStartTime, sizeof(rcclTelemetryStartTime));
+  pthread_mutex_unlock(&rcclTelemetrySnapshotMutex);
 }
 
 __attribute__((visibility("default")))
 void rcclTelemetrySnapshotEnd(const char* output_path) {
   if (!rcclTelemetryEnabled) return;
+
+  pthread_mutex_lock(&rcclTelemetrySnapshotMutex);
+  if (!rcclTelemetrySnapshotActive) {
+    fprintf(stderr,
+            "RCCL NET_TELEMETRY WARN: SnapshotEnd called without a matching "
+            "SnapshotBegin (pid=%d) — emitting JSON from current state "
+            "(deltas will be relative to the last Begin or to device "
+            "registration if no Begin was ever called).\n",
+            (int)getpid());
+  }
+  rcclTelemetrySnapshotActive = 0;
 
   int num_devs = __atomic_load_n(&rcclTelemetryNumDevs, __ATOMIC_ACQUIRE);
   if (num_devs > RCCL_TELEMETRY_MAX_DEVS) num_devs = RCCL_TELEMETRY_MAX_DEVS;
@@ -540,10 +577,14 @@ void rcclTelemetrySnapshotEnd(const char* output_path) {
   }
 
   FILE* fp = fopen(output_path, "w");
-  if (fp == NULL) return;
+  if (fp == NULL) {
+    pthread_mutex_unlock(&rcclTelemetrySnapshotMutex);
+    return;
+  }
 
   rcclTelemetryWriteJson(fp);
   fclose(fp);
+  pthread_mutex_unlock(&rcclTelemetrySnapshotMutex);
 }
 
 int rcclTelemetryRegisterDevice(int device_id, const char* roce_device,
