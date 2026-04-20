@@ -40,11 +40,7 @@ rcclTestsGetAlgoInfo_t rcclTestsGetAlgoInfo = NULL;
 rcclTestsGetProtocolName_t rcclTestsGetProtocolName = NULL;
 rcclTestsGetAlgoName_t rcclTestsGetAlgoName= NULL;
 
-/* RCCL telemetry bracketed-snapshot API (resolved via dlsym below).
- * When RCCL_TELEMETRY_SNAPSHOT_DIR is set, BenchTime() wraps the
- * performance loop with these calls so each size gets its own JSON
- * describing only the collective's contribution (hw_counters,
- * delta_tx/rx_bytes, per-QP histograms, etc.). */
+/* RCCL telemetry bracketed-snapshot API (optional, resolved via dlsym). */
 typedef void (*rcclTelemetrySnapshotBegin_t)(void);
 typedef void (*rcclTelemetrySnapshotEnd_t)(const char* output_path);
 static rcclTelemetrySnapshotBegin_t rcclTelemetrySnapshotBeginFn = NULL;
@@ -63,9 +59,6 @@ static void loadRcclSyms() {
   rcclTestsGetAlgoInfo      = (rcclTestsGetAlgoInfo_t)     dlsym(handle, "rcclGetAlgoInfo");
   rcclTestsGetAlgoName      = (rcclTestsGetAlgoName_t)     dlsym(handle,  "rcclGetAlgoName");
   rcclTestsGetProtocolName  = (rcclTestsGetProtocolName_t) dlsym(handle,  "rcclGetProtocolName");
-  /* Telemetry snapshot API is optional — only present in builds of
-   * librccl.so that include the net_telemetry subsystem. Missing symbols
-   * are silently ignored (dlerror cleared by the next dlsym). */
   rcclTelemetrySnapshotBeginFn =
       (rcclTelemetrySnapshotBegin_t)dlsym(handle, "rcclTelemetrySnapshotBegin");
   rcclTelemetrySnapshotEndFn =
@@ -816,10 +809,7 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
 
   Barrier(args);
 
-  /* RCCL telemetry bracket START (before benchmark loop).
-   * Enabled by setting RCCL_TELEMETRY_SNAPSHOT_DIR to an output dir.
-   * Zeroes runtime counters + re-takes ethtool baseline so the matching
-   * snapshot_end captures only this size's collective traffic. */
+  /* Optional RCCL telemetry bracket around this (size, in_place) loop. */
   const char* telSnapDir = getenv("RCCL_TELEMETRY_SNAPSHOT_DIR");
   if (telSnapDir != NULL && telSnapDir[0] != '\0' && rcclTelemetrySnapshotBeginFn != NULL) {
     rcclTelemetrySnapshotBeginFn();
@@ -909,8 +899,6 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   double cputimeSec = tim.elapsed()/(iters*agg_iters);
   TESTCHECK(completeColl(args));
 
-  /* RCCL telemetry bracket END (after completeColl, before Allreduce of
-   * deltaSec). Writes one JSON per (size, in_place) tuple on each rank. */
   if (telSnapDir != NULL && telSnapDir[0] != '\0' && rcclTelemetrySnapshotEndFn != NULL) {
     char snapHost[128] = "unknown";
     (void)gethostname(snapHost, sizeof(snapHost) - 1);

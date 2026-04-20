@@ -50,51 +50,9 @@ void rcclTelemetryInit(void);
 /* Flush telemetry to JSON file - called via atexit() or can be called manually */
 void rcclTelemetryFlush(void);
 
-/*
- * Bracketed-snapshot API (exported; dlopen/dlsym friendly).
- *
- * Lets an external application (e.g. rccl-tests loaded against or
- * dlopen()-ing librccl.so) bracket a workload and get a JSON file
- * whose counters/deltas describe only that interval.
- *
- * Typical use from a test:
- *   dlopen("librccl.so.1", ...);
- *   // ... ncclCommInitRank(...) -- registers devices in telemetry ...
- *   rcclTelemetrySnapshotBegin();     // zero runtime stats + re-snapshot ethtool
- *   // ... run collective(s) ...
- *   rcclTelemetrySnapshotEnd("/tmp/mytest.json");  // collect + compute deltas + write JSON
- *
- * Notes:
- *   - Both calls are no-ops when telemetry is disabled or no device has
- *     been registered yet (so they are safe to call unconditionally).
- *   - `output_path` may be NULL to write to the default location
- *     (RcclTelemetryConfig::output_dir / rccl_telemetry_<host>_<pid>.json).
- *   - Can be called multiple times (snapshot_begin / ... / snapshot_end)
- *     for back-to-back intervals.
- *   - Marked default-visibility so they resolve via dlsym() even when
- *     librccl is built with -fvisibility=hidden.
- *
- * Conflict / concurrency model:
- *   - Cross-process: fully isolated. Each process (each MPI rank, each
- *     dlopen() site) has its own librccl instance with its own baselines;
- *     snapshots from different processes never conflict. NIC-level
- *     ethtool deltas (delta_tx_bytes/...) are inherently hardware-shared
- *     across processes on the same NIC, while the runtime tx_bytes/
- *     rx_bytes atomics are per-process and accurate for the bracket.
- *   - Single-process, sequential brackets: fully supported
- *     (Begin -> work -> End -> Begin -> work -> End ...).
- *   - Single-process, concurrent brackets on different threads: the
- *     implementation serializes Begin/End with an internal mutex, so the
- *     baselines are never corrupted, but the brackets are effectively
- *     forced sequential. If a thread calls Begin while another bracket
- *     is already active, or End without a matching Begin, a one-line
- *     warning is logged to stderr.
- *   - Coexistence with application-level counter collectors (e.g.
- *     rccl-tests' NetCounterCollectBefore/AfterAndPrint): fully
- *     independent. The snapshot API manipulates librccl's own state;
- *     application-level collectors read sysfs/ethtool directly. Both
- *     can be enabled simultaneously.
- */
+/* Bracketed-snapshot API. Begin zeros runtime stats + re-baselines
+ * ethtool; End collects HW counters, computes deltas, writes JSON.
+ * Per-process state, mutex-serialized; output_path NULL = default. */
 __attribute__((visibility("default")))
 void rcclTelemetrySnapshotBegin(void);
 
