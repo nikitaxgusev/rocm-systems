@@ -66,6 +66,12 @@ typedef struct {
 } RcclPfcPatterns;
 
 typedef struct {
+  /* Source for the four delta counters. ETHTOOL reads port-wide L2 stats;
+   * IB_SYSFS reads the per-port RoCE counters under
+   *   /sys/class/infiniband/<dev>/ports/1/hw_counters/.
+   * bnxt_en (Thor2) only refreshes its ETHTOOL tx_bytes/rx_bytes every ~1 s,
+   * so short brackets see delta=0; IB sysfs values update per WQE. */
+  enum RcclHwcSource source;
   const char* tx_bytes;
   const char* rx_bytes;
   const char* tx_packets;
@@ -184,7 +190,7 @@ static const RcclHwConfig rcclHwConfigAinic = {
   (int)(sizeof(rcclHwcAinic) / sizeof(rcclHwcAinic[0])),
   { "frames_rx_pri_%d",        "frames_tx_pri_%d",
     "rx_pripause_%d_1us_count", "tx_pripause_%d_1us_count" },
-  { "octets_tx_ok", "octets_rx_ok", "frames_tx_ok", "frames_rx_ok" },
+  { HWC_ETHTOOL, "octets_tx_ok", "octets_rx_ok", "frames_tx_ok", "frames_rx_ok" },
 };
 
 /* ------------------------------------------------------------------ */
@@ -264,7 +270,11 @@ static const RcclHwConfig rcclHwConfigThor2 = {
   rcclHwcThor2,
   (int)(sizeof(rcclHwcThor2) / sizeof(rcclHwcThor2[0])),
   { "rx_pfc_ena_frames_pri%d", "tx_pfc_ena_frames_pri%d", NULL, NULL },
-  { "tx_bytes", "rx_bytes", "tx_total_frames", "rx_total_frames" },
+  /* IB sysfs — bnxt_en's ethtool port-wide tx_bytes/rx_bytes refreshes at
+   * a coarse ~1 s polling interval, making delta_* unreliable for short
+   * brackets. The IB sysfs counters under ports/1/hw_counters/ update per
+   * WQE and match what tx_rdma_ucast_bytes already reports. */
+  { HWC_IB_SYSFS, "tx_bytes", "rx_bytes", "tx_pkts", "rx_pkts" },
 };
 
 /* Compile-time check: per-HW counter arrays must fit in RcclDeviceStats::hw_counters */
@@ -728,9 +738,9 @@ static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev) {
     }
   }
 
-  /* 2c. Existing 4-way tx/rx bytes/packets snapshot. */
+  /* 2c. 4-way tx/rx bytes/packets snapshot (routed via dp->source). */
   const RcclDeltaPatterns* dp = &hw->delta;
-  if (ew_n + 4 <= RCCL_ETHTOOL_MAX_WANTED) {
+  if (dp->source == HWC_ETHTOOL && ew_n + 4 <= RCCL_ETHTOOL_MAX_WANTED) {
     snprintf(ew[ew_n].key, 64, "%s", dp->tx_bytes);   ew[ew_n].target = &dev->snap_init_tx_bytes;   ew_n++;
     snprintf(ew[ew_n].key, 64, "%s", dp->rx_bytes);   ew[ew_n].target = &dev->snap_init_rx_bytes;   ew_n++;
     snprintf(ew[ew_n].key, 64, "%s", dp->tx_packets); ew[ew_n].target = &dev->snap_init_tx_packets; ew_n++;
@@ -738,6 +748,13 @@ static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev) {
   }
 
   rcclTelemetryCollectEthtoolBatch(dev->eth_device, ew, ew_n);
+
+  if (dp->source == HWC_IB_SYSFS) {
+    dev->snap_init_tx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_bytes);
+    dev->snap_init_rx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_bytes);
+    dev->snap_init_tx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_packets);
+    dev->snap_init_rx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_packets);
+  }
 
   /* 3. Debugfs hw_counters baselines. CollectDebugfs writes into hw_counters[],
    *    so we temporarily stash current hw_counters[] values, let it populate
@@ -1046,12 +1063,14 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
     }
   }
 
-  /* 2c. Delta snapshot current-values (stored locally, deltas computed after) */
+  /* 2c. Delta snapshot current-values (stored locally, deltas computed after).
+   *     Routed via dp->source: ETHTOOL queues on the batch below, IB_SYSFS
+   *     reads directly after the batch flushes. */
   int64_t cur_tx_bytes = -1, cur_rx_bytes = -1;
   int64_t cur_tx_packets = -1, cur_rx_packets = -1;
   const RcclDeltaPatterns* dp = &hw->delta;
 
-  if (ew_n + 4 <= RCCL_ETHTOOL_MAX_WANTED) {
+  if (dp->source == HWC_ETHTOOL && ew_n + 4 <= RCCL_ETHTOOL_MAX_WANTED) {
     snprintf(ew[ew_n].key, 64, "%s", dp->tx_bytes);   ew[ew_n].target = &cur_tx_bytes;   ew_n++;
     snprintf(ew[ew_n].key, 64, "%s", dp->rx_bytes);   ew[ew_n].target = &cur_rx_bytes;   ew_n++;
     snprintf(ew[ew_n].key, 64, "%s", dp->tx_packets); ew[ew_n].target = &cur_tx_packets; ew_n++;
@@ -1060,6 +1079,13 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
 
   /* Single ethtool pass for all wanted entries */
   rcclTelemetryCollectEthtoolBatch(dev->eth_device, ew, ew_n);
+
+  if (dp->source == HWC_IB_SYSFS) {
+    cur_tx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_bytes);
+    cur_rx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_bytes);
+    cur_tx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_packets);
+    cur_rx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_packets);
+  }
 
   /* Compute deltas: snap_init < 0 means snapshot was never taken -> delta = -1 */
   dev->delta_tx_bytes   = (dev->snap_init_tx_bytes   >= 0 && cur_tx_bytes   >= 0)
