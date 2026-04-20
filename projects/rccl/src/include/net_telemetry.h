@@ -138,6 +138,14 @@ typedef struct {
   int64_t snap_init_tx_packets;
   int64_t snap_init_rx_packets;
 
+  /* Baselines for hw_counters[]/pfc_*[] — captured at SnapshotInit, subtracted
+   * from the current values at flush/SnapshotEnd so JSON reports deltas. */
+  int64_t snap_init_hw_counters[RCCL_TELEMETRY_MAX_HWC];
+  int64_t snap_init_pfc_rx_frames[8];
+  int64_t snap_init_pfc_tx_frames[8];
+  int64_t snap_init_pfc_rx_pause_us[8];
+  int64_t snap_init_pfc_tx_pause_us[8];
+
   /* Snapshot deltas — written to JSON under hw_counters */
   int64_t delta_tx_bytes;
   int64_t delta_rx_bytes;
