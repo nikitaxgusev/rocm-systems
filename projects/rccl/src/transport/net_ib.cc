@@ -1294,6 +1294,10 @@ struct ncclIbNetCommDevBase {
   struct ibv_cq* cq;
   uint64_t pad[2];
   struct ncclIbGidInfo gidInfo;
+  // Set to true when teardown begins; checked by ncclIbTest before polling
+  // to prevent concurrent ibv_poll_cq / ibv_destroy_cq races on ionic CQs.
+  std::atomic<bool> destroying{false};
+  std::mutex polling_mutex;
 };
 
 struct ncclIbListenComm {
@@ -1437,6 +1441,18 @@ ncclResult_t ncclIbInitCommDevBase(int ibDevN, struct ncclIbNetCommDevBase* base
 }
 
 ncclResult_t ncclIbDestroyBase(struct ncclIbNetCommDevBase* base) {
+  // The caller (ncclIbCloseSend / ncclIbCloseRecv) must execute the correct
+  // teardown sequence before calling this function:
+  //   1. base->destroying.store(true)             -- stop future polls
+  //   2. lock(base->polling_mutex)+unlock()        -- drain any in-flight poll
+  //   3. ibv_destroy_qp for all QPs on this CQ    -- safe: no concurrent poll
+  // We arrive here with no thread able to call ibv_poll_cq on this CQ.
+  // Drain residual FLUSH_ERR completions and destroy the CQ.
+  {
+    struct ibv_wc wcs[32];
+    int done;
+    do { NCCLCHECK(wrap_ibv_poll_cq(base->cq, 32, wcs, &done)); } while (done > 0);
+  }
   NCCLCHECK(wrap_ibv_destroy_cq(base->cq));
 
   std::lock_guard<std::mutex> lock(ncclIbDevs[base->ibDevN].mutex);
@@ -2954,7 +2970,17 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
       TIME_START(3);
       // If we expect any completions from this device's CQ
       if (r->events[i]) {
-        ret = wrap_ibv_poll_cq(r->devBases[i]->cq, 4, wcs, &wrDone);
+        // Hold polling_mutex for the duration of ibv_poll_cq so teardown
+        // can wait (by locking the same mutex) until any in-flight poll
+        // completes before destroying QPs or the CQ.
+        {
+          std::lock_guard<std::mutex> poll_lock(r->devBases[i]->polling_mutex);
+          if (r->devBases[i]->destroying.load(std::memory_order_acquire)) {
+            TIME_CANCEL(3);
+            continue;
+          }
+          ret = wrap_ibv_poll_cq(r->devBases[i]->cq, 4, wcs, &wrDone);
+        }
         if (ret != ncclSuccess) {
           failDevIdx = i;
           goto fail;
@@ -3063,6 +3089,17 @@ ncclResult_t ncclIbCloseSend(void* sendComm) {
   if (comm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
+    // Step 1+2: signal teardown and wait for any in-flight ibv_poll_cq to finish.
+    // Must happen before ibv_destroy_qp so no thread can dereference freed QP
+    // pointers left in the CQ ring by the FLUSH_ERR completions.
+    for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+      struct ncclIbNetCommDevBase* base = &(comm->devs + i)->base;
+      base->destroying.store(true, std::memory_order_release);
+      std::unique_lock<std::mutex> lk(base->polling_mutex);
+      lk.unlock(); // lock+unlock: guarantees any in-flight poll_cq has returned
+    }
+
+    // Step 3: now safe to destroy QPs (no thread can poll the CQ).
     for (int q = 0; q < comm->base.nqps; q++)
       if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
 
@@ -3070,7 +3107,7 @@ ncclResult_t ncclIbCloseSend(void* sendComm) {
       struct ncclIbSendCommDev* commDev = comm->devs + i;
       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));
       if (comm->remSizesFifo.mrs[i] != NULL) NCCLCHECK(wrap_ibv_dereg_mr(comm->remSizesFifo.mrs[i]));
-      NCCLCHECK(ncclIbDestroyBase(&commDev->base));
+      NCCLCHECK(ncclIbDestroyBase(&commDev->base)); // steps 4+5: drain+destroy CQ
     }
     free(comm);
   }
@@ -3083,6 +3120,15 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
   if (comm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
+    // Step 1+2: signal teardown and wait for any in-flight ibv_poll_cq to finish.
+    for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+      struct ncclIbNetCommDevBase* base = &(comm->devs + i)->base;
+      base->destroying.store(true, std::memory_order_release);
+      std::unique_lock<std::mutex> lk(base->polling_mutex);
+      lk.unlock();
+    }
+
+    // Step 3: now safe to destroy QPs.
     for (int q = 0; q < comm->base.nqps; q++)
       if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
 

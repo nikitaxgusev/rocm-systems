@@ -831,7 +831,7 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
  ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
    struct ncclIbRequest *r = (struct ncclIbRequest*)request;
    ncclResult_t ret = ncclSuccess;
-@@ -2875,13 +3130,17 @@ ncclResult_t ncclIbTest(void* request, i
+@@ -2875,20 +3130,24 @@ ncclResult_t ncclIbTest(void* request, i
  
      int totalWrDone = 0;
      int wrDone = 0;
@@ -846,8 +846,18 @@ diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
        TIME_START(3);
        // If we expect any completions from this device's CQ
        if (r->events[i]) {
--        ret = wrap_ibv_poll_cq(r->devBases[i]->cq, 4, wcs, &wrDone);
-+        ret = wrap_ibv_poll_cq(r->devBases[i]->cq, cqMaxPollEvent, wcs, &wrDone);
+         // Hold polling_mutex for the duration of ibv_poll_cq so teardown
+         // can wait (by locking the same mutex) until any in-flight poll
+         // completes before destroying QPs or the CQ.
+         {
+           std::lock_guard<std::mutex> poll_lock(r->devBases[i]->polling_mutex);
+           if (r->devBases[i]->destroying.load(std::memory_order_acquire)) {
+             TIME_CANCEL(3);
+             continue;
+           }
+-          ret = wrap_ibv_poll_cq(r->devBases[i]->cq, 4, wcs, &wrDone);
++          ret = wrap_ibv_poll_cq(r->devBases[i]->cq, cqMaxPollEvent, wcs, &wrDone);
+         }
          if (ret != ncclSuccess) {
            failDevIdx = i;
            goto fail;
