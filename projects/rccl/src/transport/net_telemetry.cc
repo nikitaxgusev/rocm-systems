@@ -311,7 +311,6 @@ typedef struct {
   int         counter_idx;
 } RcclDebugfsWanted;
 
-static void rcclTelemetryParseConfig(const char* config_path);
 static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev);
 static int64_t rcclTelemetryReadSysfsCounter(const char* path);
 static int64_t rcclTelemetryReadHwCounter(const char* roce_device, const char* counter_name);
@@ -406,9 +405,32 @@ void rcclTelemetryInit(void) {
   rcclTelemetryCfg.histogram_bucket_interval_ns = 30000;
   rcclTelemetryCfg.hw_counter_list[0] = '\0';
 
-  const char* config_path = getenv("RCCL_TELEMETRY_CONFIG");
-  if (config_path != NULL && config_path[0] != '\0') {
-    rcclTelemetryParseConfig(config_path);
+  const char* env_val;
+
+  env_val = getenv("RCCL_TELEMETRY_OUTPUT_DIR");
+  if (env_val != NULL && env_val[0] != '\0') {
+    strncpy(rcclTelemetryCfg.output_dir, env_val, sizeof(rcclTelemetryCfg.output_dir) - 1);
+    rcclTelemetryCfg.output_dir[sizeof(rcclTelemetryCfg.output_dir) - 1] = '\0';
+  }
+
+  env_val = getenv("RCCL_TELEMETRY_HISTOGRAM_BUCKETS");
+  if (env_val != NULL && env_val[0] != '\0') {
+    int val = atoi(env_val);
+    if (val > 0 && val <= RCCL_TELEMETRY_HISTOGRAM_SIZE)
+      rcclTelemetryCfg.histogram_max_buckets = val;
+  }
+
+  env_val = getenv("RCCL_TELEMETRY_HISTOGRAM_INTERVAL_NS");
+  if (env_val != NULL && env_val[0] != '\0') {
+    int64_t val = strtoll(env_val, NULL, 10);
+    if (val > 0)
+      rcclTelemetryCfg.histogram_bucket_interval_ns = val;
+  }
+
+  env_val = getenv("RCCL_TELEMETRY_HW_COUNTERS");
+  if (env_val != NULL) {
+    strncpy(rcclTelemetryCfg.hw_counter_list, env_val, sizeof(rcclTelemetryCfg.hw_counter_list) - 1);
+    rcclTelemetryCfg.hw_counter_list[sizeof(rcclTelemetryCfg.hw_counter_list) - 1] = '\0';
   }
 
   memset(rcclTelemetryDevs, 0, sizeof(rcclTelemetryDevs));
@@ -786,82 +808,6 @@ static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev) {
       dev->hw_counters[idx] = saved[i];
     }
   }
-}
-
-/* ------------------------------------------------------------------ */
-/* Config parsing                                                     */
-/* ------------------------------------------------------------------ */
-
-static void rcclTelemetryParseConfig(const char* config_path) {
-  FILE* fp = fopen(config_path, "r");
-  if (fp == NULL) {
-    return;
-  }
-
-  char line[1024];
-  while (fgets(line, sizeof(line), fp) != NULL) {
-    char* p;
-
-    p = strstr(line, "\"output_dir\"");
-    if (p != NULL) {
-      p = strchr(p, ':');
-      if (p != NULL) {
-        p = strchr(p, '"');
-        if (p != NULL) {
-          p++;
-          char* end = strchr(p, '"');
-          if (end != NULL) {
-            size_t len = (size_t)(end - p);
-            if (len >= sizeof(rcclTelemetryCfg.output_dir))
-              len = sizeof(rcclTelemetryCfg.output_dir) - 1;
-            strncpy(rcclTelemetryCfg.output_dir, p, len);
-            rcclTelemetryCfg.output_dir[len] = '\0';
-          }
-        }
-      }
-    }
-
-    p = strstr(line, "\"histogram_max_buckets\"");
-    if (p != NULL) {
-      p = strchr(p, ':');
-      if (p != NULL) {
-        int val = atoi(p + 1);
-        if (val > 0 && val <= RCCL_TELEMETRY_HISTOGRAM_SIZE)
-          rcclTelemetryCfg.histogram_max_buckets = val;
-      }
-    }
-
-    p = strstr(line, "\"histogram_bucket_interval_ns\"");
-    if (p != NULL) {
-      p = strchr(p, ':');
-      if (p != NULL) {
-        int64_t val = strtoll(p + 1, NULL, 10);
-        if (val > 0)
-          rcclTelemetryCfg.histogram_bucket_interval_ns = val;
-      }
-    }
-
-    p = strstr(line, "\"hw_counter_list\"");
-    if (p != NULL) {
-      p = strchr(p, ':');
-      if (p != NULL) {
-        p = strchr(p, '"');
-        if (p != NULL) {
-          p++;
-          char* end = strchr(p, '"');
-          if (end != NULL) {
-            size_t len = (size_t)(end - p);
-            if (len >= sizeof(rcclTelemetryCfg.hw_counter_list))
-              len = sizeof(rcclTelemetryCfg.hw_counter_list) - 1;
-            strncpy(rcclTelemetryCfg.hw_counter_list, p, len);
-            rcclTelemetryCfg.hw_counter_list[len] = '\0';
-          }
-        }
-      }
-    }
-  }
-
-  fclose(fp);
 }
 
 /* ------------------------------------------------------------------ */

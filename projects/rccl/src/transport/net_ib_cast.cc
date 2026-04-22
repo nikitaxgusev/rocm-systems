@@ -175,6 +175,11 @@ NCCL_PARAM(IbCastGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 RCCL_PARAM(IbCastCtsInlineData, "CTS_INLINE_DATA", -1);
 RCCL_PARAM(IbCastCtsOffloadEnabled, "CTS_OFFLOAD_ENABLED", -1);
 
+static int ncclIbCastQpActive = 0;
+static int ncclIbCastQpTotal  = 0;
+static int ncclIbCastQpPeak   = 0;
+NCCL_PARAM(IbCastQpWarnThreshold, "IB_QP_WARN_THRESHOLD", 4096);
+
 extern int64_t rcclParamAinicRoce();
 static ncclResult_t IbCastStatsInit(struct ncclIbStats* stat) {
   __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
@@ -204,8 +209,11 @@ static int ncclIbCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const
   int localNqps = qp_multiplier * localNdevs;
   int remoteNqps = qp_multiplier * remoteNdevs;
   int maxNqps = (remoteNqps > localNqps) ? remoteNqps : localNqps;
-  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d", 
-       funcName, maxNqps, localNqps, remoteNqps);
+  int qpActive = __atomic_load_n(&ncclIbCastQpActive, __ATOMIC_RELAXED);
+  int qpPeak   = __atomic_load_n(&ncclIbCastQpPeak, __ATOMIC_RELAXED);
+  int qpTotal  = __atomic_load_n(&ncclIbCastQpTotal, __ATOMIC_RELAXED);
+  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d (QP active=%d peak=%d total_created=%d)",
+       funcName, maxNqps, localNqps, remoteNqps, qpActive, qpPeak, qpTotal);
   return maxNqps;
 }
 
@@ -1870,6 +1878,17 @@ ncclResult_t IbCastCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
     qpInitAttr.cap.max_inline_data = ncclIbUseInline ? sizeof(struct ncclIbSendFifo) : 0;
   }
   NCCLCHECK(wrap_ibv_create_qp(&qp->qp, base->pd, &qpInitAttr));
+  {
+    int total  = __atomic_add_fetch(&ncclIbCastQpTotal, 1, __ATOMIC_RELAXED);
+    int active = __atomic_add_fetch(&ncclIbCastQpActive, 1, __ATOMIC_RELAXED);
+    if (active > __atomic_load_n(&ncclIbCastQpPeak, __ATOMIC_RELAXED))
+      __atomic_store_n(&ncclIbCastQpPeak, active, __ATOMIC_RELAXED);
+    int threshold = ncclParamIbCastQpWarnThreshold();
+    if (threshold > 0 && active == threshold)
+      WARN("NET/IB: QP count reached %d (threshold=%d, total_created=%d). "
+           "Risk of QP exhaustion. Consider PXN or reducing QPS_PER_CONNECTION.",
+           active, threshold, total);
+  }
   if (rcclAinicRoce) {
     NCCLCHECK(wrap_ionicdv_qp_set_gda(qp->qp, false, true));
   }
@@ -3879,7 +3898,10 @@ ncclResult_t IbCastCloseSend(void* sendComm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+      if (comm->base.qps[q].qp != NULL) {
+        NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+        __atomic_sub_fetch(&ncclIbCastQpActive, 1, __ATOMIC_RELAXED);
+      }
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbSendCommDev* commDev = comm->devs + i;
@@ -3899,7 +3921,10 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+      if (comm->base.qps[q].qp != NULL) {
+        NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+        __atomic_sub_fetch(&ncclIbCastQpActive, 1, __ATOMIC_RELAXED);
+      }
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbRecvCommDev* commDev = comm->devs + i;
@@ -3911,7 +3936,10 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
           commDev->gpuFlush.gpuMr = nullptr;
           if(commDev->gpuFlush.dmabuf_fd > 0) { close(commDev->gpuFlush.dmabuf_fd);}
         }
-        if (commDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
+        if (commDev->gpuFlush.qp.qp != NULL) {
+          NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
+          __atomic_sub_fetch(&ncclIbCastQpActive, 1, __ATOMIC_RELAXED);
+        }
         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
       }
       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));
