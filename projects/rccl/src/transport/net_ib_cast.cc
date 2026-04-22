@@ -1618,6 +1618,9 @@ struct ncclIbNetCommDevBase {
   struct ibv_cq* cq;
   uint64_t pad[2];
   struct ncclIbGidInfo gidInfo;
+  // Synchronise ibv_poll_cq (progress thread) against QP/CQ teardown.
+  std::atomic<bool> destroying{false};
+  std::mutex polling_mutex;
 };
 
 struct ncclIbListenComm {
@@ -1797,6 +1800,12 @@ ncclResult_t IbCastInitCommDevBase(int ibDevN, struct ncclIbNetCommDevBase* base
 }
 
 ncclResult_t IbCastDestroyBase(struct ncclIbNetCommDevBase* base) {
+  // Caller already quiesced pollers and destroyed QPs; drain FLUSH_ERR CQEs then free the CQ.
+  {
+    struct ibv_wc wcs[32];
+    int done;
+    do { NCCLCHECK(wrap_ibv_poll_cq(base->cq, 32, wcs, &done)); } while (done > 0);
+  }
   NCCLCHECK(wrap_ibv_destroy_cq(base->cq));
 
   std::lock_guard<std::mutex> lock(IbCastDevs[base->ibDevN].mutex);
@@ -3657,8 +3666,16 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
       TIME_START(3);
       // If we expect any completions from this device's CQ
       if (r->events[i]) {
-        NCCLCHECK(wrap_ibv_poll_cq(r->devBases[i]->cq, cqMaxPollEvent,
-                                   wcs, &wrDone));
+        // Hold polling_mutex across poll_cq; teardown drains via lock+unlock after setting destroying.
+        {
+          std::lock_guard<std::mutex> poll_lock(r->devBases[i]->polling_mutex);
+          if (r->devBases[i]->destroying.load(std::memory_order_acquire)) {
+            TIME_CANCEL(3);
+            continue;
+          }
+          NCCLCHECK(wrap_ibv_poll_cq(r->devBases[i]->cq, cqMaxPollEvent,
+                                     wcs, &wrDone));
+        }
         totalWrDone += wrDone;
         if (wrDone == 0) { TIME_CANCEL(3); } else { TIME_STOP(3); }
         if (wrDone == 0) continue;
@@ -3787,6 +3804,14 @@ ncclResult_t IbCastCloseSend(void* sendComm) {
   if (comm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
+    // Quiesce pollers before destroying QPs: set destroying, then lock+unlock to drain in-flight poll_cq.
+    for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+      struct ncclIbNetCommDevBase* base = &(comm->devs + i)->base;
+      base->destroying.store(true, std::memory_order_release);
+      std::unique_lock<std::mutex> lk(base->polling_mutex);
+      lk.unlock();
+    }
+
     for (int q = 0; q < comm->base.nqps; q++)
       if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
 
@@ -3806,6 +3831,14 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
   struct ncclIbRecvComm* comm = (struct ncclIbRecvComm*)recvComm;
   if (comm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
+
+    // Quiesce pollers before destroying QPs: set destroying, then lock+unlock to drain in-flight poll_cq.
+    for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+      struct ncclIbNetCommDevBase* base = &(comm->devs + i)->base;
+      base->destroying.store(true, std::memory_order_release);
+      std::unique_lock<std::mutex> lk(base->polling_mutex);
+      lk.unlock();
+    }
 
     for (int q = 0; q < comm->base.nqps; q++)
       if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
