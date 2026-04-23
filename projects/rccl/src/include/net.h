@@ -73,9 +73,9 @@ struct ncclIbQpTracker {
   int peak;
 };
 
-static inline void ncclIbQpTrackCreate(struct ncclIbQpTracker* t) {
-  int active = __atomic_add_fetch(&t->active, 1, __ATOMIC_RELAXED);
-  __atomic_add_fetch(&t->total, 1, __ATOMIC_RELAXED);
+static inline void ncclIbQpTrackCreateN(struct ncclIbQpTracker* t, int n) {
+  int active = __atomic_add_fetch(&t->active, n, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&t->total, n, __ATOMIC_RELAXED);
   if (active > __atomic_load_n(&t->peak, __ATOMIC_RELAXED))
     __atomic_store_n(&t->peak, active, __ATOMIC_RELAXED);
 }

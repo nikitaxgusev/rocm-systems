@@ -2065,8 +2065,7 @@ ib_recv_dev_list:
     }
     devIndex = (devIndex + 1) % comm->base.vProps.ndevs;
   }
-  for (int q = 0; q < comm->base.nqps; q++)
-    ncclIbQpTrackCreate(&ncclIbCastQpTracker);
+  ncclIbQpTrackCreateN(&ncclIbCastQpTracker, comm->base.nqps);
   INFO(NCCL_NET, "NET/IB: IbCastConnect QPs created (QP active=%d peak=%d total_created=%d)",
        __atomic_load_n(&ncclIbCastQpTracker.active, __ATOMIC_RELAXED),
        __atomic_load_n(&ncclIbCastQpTracker.peak, __ATOMIC_RELAXED),
@@ -2532,11 +2531,7 @@ ib_recv:
       NCCLCHECKGOTO(IbCastRtsQp(rCommDev->gpuFlush.qp.qp), ret, fail);
     }
   }
-  for (int q = 0; q < rComm->base.nqps; q++)
-    ncclIbQpTrackCreate(&ncclIbCastQpTracker);
-  if (rComm->flushEnabled)
-    for (int i = 0; i < rComm->base.vProps.ndevs; i++)
-      ncclIbQpTrackCreate(&ncclIbCastQpTracker);
+  ncclIbQpTrackCreateN(&ncclIbCastQpTracker, rComm->base.nqps + (rComm->flushEnabled ? rComm->base.vProps.ndevs : 0));
   INFO(NCCL_NET, "NET/IB: IbCastAccept QPs created (QP active=%d peak=%d total_created=%d)",
        __atomic_load_n(&ncclIbCastQpTracker.active, __ATOMIC_RELAXED),
        __atomic_load_n(&ncclIbCastQpTracker.peak, __ATOMIC_RELAXED),
