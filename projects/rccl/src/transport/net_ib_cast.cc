@@ -81,6 +81,59 @@ const char* IbCastProviderName[] = {
 };
 
 static int ncclNIbDevs = -1;
+
+// Forward-declare NCCL_IB_MAX_QPS and ncclIbQp here so ncclIbSharedConn can use them.
+// The authoritative #define remains at its original location; this early definition
+// must match it exactly.
+#ifndef NCCL_IB_MAX_QPS
+#define NCCL_IB_MAX_QPS 128
+#endif
+
+// ncclIbQp — per-QP handle (defined here early for use in ncclIbSharedConn;
+// the struct is also present at its original location where it is typedef'd).
+// We use an anonymous tag to allow forward-use; the later definition is compatible.
+struct ncclIbQp {
+  struct ibv_qp* qp;
+  int devIndex;
+  int remDevIdx;
+  int8_t ctsQpSlot;
+};
+
+// QP sharing: shared connection structs
+#define NCCL_IB_MAX_SHARED_CONNS  512
+#define NCCL_IB_MAX_CONN_SLOTS    8
+#define NCCL_IB_MAX_PENDING_CQE   256
+
+struct ncclIbPendingCqe {
+  struct ibv_wc wc;
+};
+
+// Forward declaration — ncclIbNetCommBase is defined later.
+struct ncclIbNetCommBase;
+
+// ncclIbSharedConn owns the QPs and CQ for one physical peer connection.
+// Multiple communicators (slots) share it when they connect to the same peer.
+struct ncclIbSharedConn {
+  bool     inUse;
+  int      ibDevN;
+  bool     isP2p;
+  int      channel_id;
+  union ibv_gid remoteGid;   // cache key
+  int      refCount;
+  struct   ncclIbQp qps[NCCL_IB_MAX_QPS];
+  int      nqps;
+  struct   ibv_cq* cq;
+  pthread_mutex_t pollMutex;  // serialize ibv_poll_cq across comms
+  pthread_mutex_t sendMutex;  // serialize ibv_post_send across comms
+  // per-slot pending completion rings
+  struct ncclIbPendingCqe pendingCqe[NCCL_IB_MAX_CONN_SLOTS][NCCL_IB_MAX_PENDING_CQE];
+  int pendingHead[NCCL_IB_MAX_CONN_SLOTS];
+  int pendingTail[NCCL_IB_MAX_CONN_SLOTS];
+  // Slot table: maps slotId -> comm
+  struct ncclIbNetCommBase* slots[NCCL_IB_MAX_CONN_SLOTS];
+  int nSlots;
+};
+
 struct alignas(64) ncclIbDev {
   std::mutex mutex;
   int device;
@@ -108,6 +161,11 @@ struct alignas(64) ncclIbDev {
       int dataDirect;
     } mlx5;
   } capsProvider;
+  // Shared connection cache — protected by sharedConnLock.
+  // Stored as pointers to heap-allocated structs to keep ncclIbDev size manageable.
+  struct ncclIbSharedConn* sharedConns[NCCL_IB_MAX_SHARED_CONNS];
+  int nSharedConns;
+  pthread_mutex_t sharedConnLock;
 };
 
 #define MAX_IB_DEVS  32
@@ -816,7 +874,9 @@ ncclResult_t IbCastSetNetAttr(void *ctx, ncclNetAttr_t *netAttr) {
 
 static ncclProfilerCallback_t ncclProfilerFunction;
 
+#ifndef NCCL_IB_MAX_QPS
 #define NCCL_IB_MAX_QPS 128
+#endif
 
 #define NSEC_PER_USEC           1000ULL
 #define NSEC_PER_MSEC           (NSEC_PER_USEC * 1000)
@@ -1217,6 +1277,11 @@ ncclResult_t IbCastInit(void** ctx, uint64_t commId, ncclNetCommConfig_t* config
               IbCastDevs[ncclNIbDevs].mrCache.population = 0;
               IbCastDevs[ncclNIbDevs].mrCache.slots = NULL;
               NCCLCHECK(IbCastStatsInit(&IbCastDevs[ncclNIbDevs].stats));
+              // Initialize shared connection cache (pointer array, heap-allocated on demand)
+              IbCastDevs[ncclNIbDevs].nSharedConns = 0;
+              memset(IbCastDevs[ncclNIbDevs].sharedConns, 0,
+                     NCCL_IB_MAX_SHARED_CONNS * sizeof(struct ncclIbSharedConn*));
+              PTHREADCHECKGOTO(pthread_mutex_init(&IbCastDevs[ncclNIbDevs].sharedConnLock, NULL), "pthread_mutex_init sharedConnLock", ret, fail);
 
               // Enable ADAPTIVE_ROUTING by default on IB networks
               // But allow it to be overloaded by an env parameter
@@ -1614,6 +1679,8 @@ struct ncclIbRequest {
 
 struct ncclIbNetCommDevBase {
   int ibDevN;
+  bool ownsCq;  // true = this base allocated the CQ and should destroy it
+  uint8_t _devBasePad[3];  // alignment padding after ownsCq
   struct ibv_pd* pd;
   struct ibv_cq* cq;
   uint64_t pad[2];
@@ -1636,7 +1703,8 @@ struct alignas(64) ncclIbSendFifo {
   uint32_t tag;
   uint64_t idx;
   uint16_t rxReqIndex;
-  char padding[14];
+  uint8_t  rxSlotId;  // slot index in sharedConn; 0 = not shared / legacy
+  char padding[13];   // was 14; reduced by 1 for rxSlotId; struct stays 64 bytes
 };
 
 struct alignas(32) ncclIbSendFifoCtsInline {
@@ -1647,15 +1715,12 @@ struct alignas(32) ncclIbSendFifoCtsInline {
   uint16_t rxReqIndex;
   uint16_t tag;
   uint32_t idx;
-  char padding[9];
+  uint8_t  rxSlotId;  // slot index in sharedConn; 0 = not shared / legacy
+  char padding[8];    // was 9; reduced by 1 for rxSlotId
 } __attribute__((packed));
 
-struct ncclIbQp {
-  struct ibv_qp* qp;
-  int devIndex;
-  int remDevIdx;
-  int8_t ctsQpSlot;
-};
+// ncclIbQp is defined earlier (before ncclIbDev) to allow use in ncclIbSharedConn.
+// See the definition near the top of this file.
 
 struct ncclIbRemSizesFifo {
   int elems[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
@@ -1700,6 +1765,13 @@ struct alignas(32) ncclIbNetCommBase {
   int nqps;
   int qpIndex;
   int devIndex;
+  // QP sharing: slot in the shared connection (-1 if not sharing)
+  int slotId;
+  // QP sharing: pointer to the shared connection (NULL if not sharing)
+  struct ncclIbSharedConn* sharedConn;
+  // Padding to keep ncclIbNetCommBase size a 32-byte multiple
+  // slotId(4) + sharedConn(8) = 12 bytes; need 20 more for next 32-byte boundary
+  uint8_t _sharedPad[20];
   struct ncclSocket sock;
   int ready;
   int rxPosts[NCCL_IB_MAX_QPS * NCCL_NET_IB_MAX_RECVS];
@@ -1770,6 +1842,158 @@ struct ncclIbRecvComm {
 };
 static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm fifo must be 32-byte aligned");
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Shared-connection management helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Compare two GIDs for equality.
+static bool ibGidEqual(const union ibv_gid* a, const union ibv_gid* b) {
+  return (a->global.subnet_prefix == b->global.subnet_prefix &&
+          a->global.interface_id  == b->global.interface_id);
+}
+
+// Find an existing shared connection for (ibDevN, remoteGid, isP2p, channel_id),
+// or create a new empty slot for it.
+// Returns ncclSuccess; sets *conn to the existing or new slot (with inUse=false
+// if newly created so the caller can populate it).
+// Must NOT be called while holding sharedConnLock.
+// On return *conn != NULL.  If (*conn)->inUse == false the caller must
+// populate the slot and set inUse=true under the lock.
+static ncclResult_t ibDevFindOrCreateSharedConn(
+    struct ncclIbDev* ibDev, const union ibv_gid* remoteGid,
+    bool isP2p, int channel_id,
+    struct ncclIbSharedConn** conn) {
+  *conn = NULL;
+  pthread_mutex_lock(&ibDev->sharedConnLock);
+  // Search for existing in-use entry
+  for (int i = 0; i < ibDev->nSharedConns; i++) {
+    struct ncclIbSharedConn* sc = ibDev->sharedConns[i];
+    if (sc != NULL && sc->inUse &&
+        sc->isP2p == isP2p &&
+        sc->channel_id == channel_id &&
+        ibGidEqual(&sc->remoteGid, remoteGid)) {
+      *conn = sc;
+      pthread_mutex_unlock(&ibDev->sharedConnLock);
+      return ncclSuccess;
+    }
+  }
+  // No existing entry — allocate a new ncclIbSharedConn on the heap
+  if (ibDev->nSharedConns >= NCCL_IB_MAX_SHARED_CONNS) {
+    pthread_mutex_unlock(&ibDev->sharedConnLock);
+    WARN("NET/IB: sharedConns table full for dev %s (max %d)", ibDev->devName, NCCL_IB_MAX_SHARED_CONNS);
+    return ncclInternalError;
+  }
+  // Scan for a recycled (inUse=false) pointer slot first
+  struct ncclIbSharedConn* slot = NULL;
+  for (int i = 0; i < ibDev->nSharedConns; i++) {
+    if (ibDev->sharedConns[i] != NULL && !ibDev->sharedConns[i]->inUse) {
+      slot = ibDev->sharedConns[i];
+      break;
+    }
+  }
+  if (slot == NULL) {
+    // Allocate a new one
+    slot = (struct ncclIbSharedConn*)calloc(1, sizeof(struct ncclIbSharedConn));
+    if (slot == NULL) {
+      pthread_mutex_unlock(&ibDev->sharedConnLock);
+      WARN("NET/IB: failed to allocate ncclIbSharedConn");
+      return ncclSystemError;
+    }
+    ibDev->sharedConns[ibDev->nSharedConns++] = slot;
+  }
+  // Initialise the new slot (caller will fill QPs/CQ and set inUse=true)
+  memset(slot, 0, sizeof(*slot));
+  slot->inUse      = false;  // caller sets true after populating
+  slot->ibDevN     = (int)(ibDev - IbCastDevs);
+  slot->isP2p      = isP2p;
+  slot->channel_id = channel_id;
+  slot->remoteGid  = *remoteGid;
+  slot->refCount   = 0;
+  slot->nqps       = 0;
+  slot->cq         = NULL;
+  slot->nSlots     = 0;
+  for (int s = 0; s < NCCL_IB_MAX_CONN_SLOTS; s++) {
+    slot->pendingHead[s] = 0;
+    slot->pendingTail[s] = 0;
+    slot->slots[s]       = NULL;
+  }
+  pthread_mutex_init(&slot->pollMutex, NULL);
+  pthread_mutex_init(&slot->sendMutex, NULL);
+  *conn = slot;
+  pthread_mutex_unlock(&ibDev->sharedConnLock);
+  return ncclSuccess;
+}
+
+// Allocate a slot in sharedConn for this comm.  Returns slotId (1-based; 0 is
+// reserved for "not shared").  Thread-safe via sharedConnLock.
+static ncclResult_t ibSharedConnAllocSlot(
+    struct ncclIbDev* ibDev,
+    struct ncclIbSharedConn* conn,
+    struct ncclIbNetCommBase* commBase,
+    int* slotId) {
+  pthread_mutex_lock(&ibDev->sharedConnLock);
+  if (conn->nSlots >= NCCL_IB_MAX_CONN_SLOTS) {
+    pthread_mutex_unlock(&ibDev->sharedConnLock);
+    WARN("NET/IB: sharedConn slot table full (max %d)", NCCL_IB_MAX_CONN_SLOTS);
+    return ncclInternalError;
+  }
+  // slots[0] is unused (slotId 0 = "not shared" in IMM encoding).
+  // We use slots[1..NCCL_IB_MAX_CONN_SLOTS-1].
+  int s = -1;
+  for (int i = 1; i < NCCL_IB_MAX_CONN_SLOTS; i++) {
+    if (conn->slots[i] == NULL) { s = i; break; }
+  }
+  if (s == -1) {
+    pthread_mutex_unlock(&ibDev->sharedConnLock);
+    WARN("NET/IB: no free slot in sharedConn");
+    return ncclInternalError;
+  }
+  conn->slots[s] = commBase;
+  conn->nSlots++;
+  conn->refCount++;
+  *slotId = s;
+  pthread_mutex_unlock(&ibDev->sharedConnLock);
+  return ncclSuccess;
+}
+
+// Release a slot in sharedConn.  If refCount reaches 0, destroys QPs and CQ.
+static ncclResult_t ibSharedConnReleaseSlot(
+    struct ncclIbDev* ibDev,
+    struct ncclIbSharedConn* conn,
+    int slotId) {
+  pthread_mutex_lock(&ibDev->sharedConnLock);
+  if (slotId >= 0 && slotId < NCCL_IB_MAX_CONN_SLOTS) {
+    conn->slots[slotId] = NULL;
+    conn->nSlots--;
+  }
+  conn->refCount--;
+  bool shouldDestroy = (conn->refCount <= 0);
+  pthread_mutex_unlock(&ibDev->sharedConnLock);
+
+  if (shouldDestroy) {
+    // Destroy QPs and CQ while not holding the lock
+    for (int q = 0; q < conn->nqps; q++) {
+      if (conn->qps[q].qp != NULL) {
+        wrap_ibv_destroy_qp(conn->qps[q].qp);
+        conn->qps[q].qp = NULL;
+      }
+    }
+    if (conn->cq != NULL) {
+      wrap_ibv_destroy_cq(conn->cq);
+      conn->cq = NULL;
+    }
+    pthread_mutex_destroy(&conn->pollMutex);
+    pthread_mutex_destroy(&conn->sendMutex);
+    // Mark as not in use (the heap allocation is retained for reuse)
+    pthread_mutex_lock(&ibDev->sharedConnLock);
+    conn->inUse = false;
+    pthread_mutex_unlock(&ibDev->sharedConnLock);
+  }
+  return ncclSuccess;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 static void IbCastAddEvent(struct ncclIbRequest* req, int devIndex,
                            struct ncclIbNetCommDevBase* base, bool ctsEvent) {
   req->events[devIndex]++;
@@ -1780,6 +2004,7 @@ static void IbCastAddEvent(struct ncclIbRequest* req, int devIndex,
 
 ncclResult_t IbCastInitCommDevBase(int ibDevN, struct ncclIbNetCommDevBase* base, void* cq_context) {
   base->ibDevN = ibDevN;
+  base->ownsCq = true;  // we allocate the CQ here; may be overridden if sharing
   ncclIbDev* ibDev = IbCastDevs + ibDevN;
   {
     std::lock_guard<std::mutex> lock(ibDev->mutex);
@@ -1790,14 +2015,17 @@ ncclResult_t IbCastInitCommDevBase(int ibDevN, struct ncclIbNetCommDevBase* base
   }
 
   // CQ is sized to accommodate the max SQ + RQ WQE completions. If each SQ WQE could be signaled, then,
-  // for each QP, there can be 2*MAX_REQUESTS completions for SQ and MAX_REQUESTS completions for RQ. 
+  // for each QP, there can be 2*MAX_REQUESTS completions for SQ and MAX_REQUESTS completions for RQ.
   NCCLCHECK(wrap_ibv_create_cq(&base->cq, ibDev->context, 3*MAX_REQUESTS*ncclParamIbCastQpsPerConn(), cq_context, NULL, 0));
 
   return ncclSuccess;
 }
 
 ncclResult_t IbCastDestroyBase(struct ncclIbNetCommDevBase* base) {
-  NCCLCHECK(wrap_ibv_destroy_cq(base->cq));
+  // Only destroy the CQ if this base allocated it (not shared)
+  if (base->ownsCq && base->cq != NULL) {
+    NCCLCHECK(wrap_ibv_destroy_cq(base->cq));
+  }
 
   std::lock_guard<std::mutex> lock(IbCastDevs[base->ibDevN].mutex);
   if (0 == --IbCastDevs[base->ibDevN].pdRefs) {
@@ -1984,6 +2212,9 @@ ncclResult_t IbCastConnect(void* ctx, int dev, void* opaqueHandle, void** sendCo
   NCCLCHECK(ncclIbMalloc((void**)&comm, sizeof(struct ncclIbSendComm)));
   NCCLCHECKGOTO(IbCastStatsInit(&comm->base.stats), ret, fail);
   NCCLCHECKGOTO(ncclSocketInit(&comm->base.sock, &handle->connectAddr, handle->magic, ncclSocketTypeNetIb, NULL, 1), ret, fail);
+  // Initialize shared-connection fields
+  comm->base.slotId     = -1;
+  comm->base.sharedConn = NULL;
   stage->comm = comm;
   stage->state = ncclIbCommStateConnect;
   NCCLCHECKGOTO(ncclSocketConnect(&comm->base.sock), ret, fail);
@@ -2219,6 +2450,65 @@ ib_connect:
 
   comm->base.nDataQps = std::max(comm->base.vProps.ndevs, comm->base.nRemDevs);
 
+  // ── QP-sharing: register or borrow a shared connection ──────────────────
+  // Use the first device's remote GID as the cache key.
+  if (rcclAinicRoce && comm->base.vProps.ndevs > 0 && remMeta.ndevs > 0) {
+    int ibDevN0 = comm->base.vProps.devs[0];
+    struct ncclIbDev* ibDev0 = IbCastDevs + ibDevN0;
+    union ibv_gid remGid0 = remMeta.devs[0].gid;
+    struct ncclIbSharedConn* sc = NULL;
+    NCCLCHECKGOTO(ibDevFindOrCreateSharedConn(ibDev0, &remGid0, (bool)isP2p, channel_id, &sc), ret, fail);
+
+    if (sc->inUse) {
+      // An existing shared connection already has QPs in RTS — borrow it.
+      // Destroy the freshly-created QPs and CQ we just brought up (they're redundant).
+      for (int q = 0; q < comm->base.nqps; q++) {
+        if (comm->base.qps[q].qp != NULL) {
+          wrap_ibv_destroy_qp(comm->base.qps[q].qp);
+          comm->base.qps[q].qp = NULL;
+        }
+      }
+      for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+        if (comm->devs[i].base.ownsCq && comm->devs[i].base.cq != NULL) {
+          wrap_ibv_destroy_cq(comm->devs[i].base.cq);
+          comm->devs[i].base.cq = NULL;
+          comm->devs[i].base.ownsCq = false;
+        }
+      }
+      // Point to the shared QPs and CQ
+      memcpy(comm->base.qps, sc->qps, sc->nqps * sizeof(struct ncclIbQp));
+      comm->base.nqps = sc->nqps;
+      // Point devBases at the shared CQ
+      for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+        comm->devs[i].base.cq    = sc->cq;
+        comm->devs[i].base.ownsCq = false;
+      }
+      comm->base.sharedConn = sc;
+      int slotId = -1;
+      NCCLCHECKGOTO(ibSharedConnAllocSlot(ibDev0, sc, &comm->base, &slotId), ret, fail);
+      comm->base.slotId = slotId;
+      INFO(NCCL_NET, "NET/IB: IbCastConnect reusing sharedConn slot=%d for peer GID %lx:%lx",
+           slotId, remGid0.global.subnet_prefix, remGid0.global.interface_id);
+    } else {
+      // First comm to this peer — register our QPs+CQ as the shared conn.
+      sc->nqps = comm->base.nqps;
+      memcpy(sc->qps, comm->base.qps, comm->base.nqps * sizeof(struct ncclIbQp));
+      // Transfer CQ ownership to the shared conn; this comm no longer owns it.
+      sc->cq = comm->devs[0].base.cq;
+      for (int i = 0; i < comm->base.vProps.ndevs; i++) {
+        comm->devs[i].base.ownsCq = false;  // sharedConn now owns the CQ
+      }
+      sc->inUse = true;
+      comm->base.sharedConn = sc;
+      int slotId = -1;
+      NCCLCHECKGOTO(ibSharedConnAllocSlot(ibDev0, sc, &comm->base, &slotId), ret, fail);
+      comm->base.slotId = slotId;
+      INFO(NCCL_NET, "NET/IB: IbCastConnect registered new sharedConn slot=%d for peer GID %lx:%lx",
+           slotId, remGid0.global.subnet_prefix, remGid0.global.interface_id);
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
+
   comm->base.ready = 1;
   stage->state = ncclIbCommStateConnected;
   stage->offset = 0;
@@ -2310,6 +2600,9 @@ ncclResult_t IbCastAccept(void* listenComm, void** recvComm, ncclNetDeviceHandle
 
   NCCLCHECK(ncclIbMalloc((void**)&rComm, sizeof(struct ncclIbRecvComm)));
   NCCLCHECKGOTO(IbCastStatsInit(&rComm->base.stats), ret, fail);
+  // Initialize shared-connection fields
+  rComm->base.slotId     = -1;
+  rComm->base.sharedConn = NULL;
   stage->comm = rComm;
   stage->state = ncclIbCommStateAccept;
   NCCLCHECKGOTO(ncclSocketInit(&rComm->base.sock), ret, fail);
@@ -2549,6 +2842,61 @@ ib_recv:
   meta.isP2p = remMeta.isP2p;
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
   rComm->base.nDataQps = std::max(rComm->base.vProps.ndevs, rComm->base.nRemDevs);
+
+  // ── QP-sharing: register or borrow a shared connection (receiver side) ──
+  if (rcclAinicRoce && rComm->base.vProps.ndevs > 0 && remMeta.ndevs > 0) {
+    int ibDevN0acc = rComm->base.vProps.devs[0];
+    struct ncclIbDev* ibDev0acc = IbCastDevs + ibDevN0acc;
+    // Use the remote GID (sender's GID) from remMeta as the cache key
+    union ibv_gid remGid0acc = remMeta.devs[0].gid;
+    struct ncclIbSharedConn* sc = NULL;
+    NCCLCHECKGOTO(ibDevFindOrCreateSharedConn(ibDev0acc, &remGid0acc, (bool)remMeta.isP2p, channel_id, &sc), ret, fail);
+
+    if (sc->inUse) {
+      // Borrow the existing shared connection
+      for (int q = 0; q < rComm->base.nqps; q++) {
+        if (rComm->base.qps[q].qp != NULL) {
+          wrap_ibv_destroy_qp(rComm->base.qps[q].qp);
+          rComm->base.qps[q].qp = NULL;
+        }
+      }
+      for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
+        if (rComm->devs[i].base.ownsCq && rComm->devs[i].base.cq != NULL) {
+          wrap_ibv_destroy_cq(rComm->devs[i].base.cq);
+          rComm->devs[i].base.cq = NULL;
+          rComm->devs[i].base.ownsCq = false;
+        }
+      }
+      memcpy(rComm->base.qps, sc->qps, sc->nqps * sizeof(struct ncclIbQp));
+      rComm->base.nqps = sc->nqps;
+      for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
+        rComm->devs[i].base.cq    = sc->cq;
+        rComm->devs[i].base.ownsCq = false;
+      }
+      rComm->base.sharedConn = sc;
+      int slotIdAcc = -1;
+      NCCLCHECKGOTO(ibSharedConnAllocSlot(ibDev0acc, sc, &rComm->base, &slotIdAcc), ret, fail);
+      rComm->base.slotId = slotIdAcc;
+      INFO(NCCL_NET, "NET/IB: IbCastAccept reusing sharedConn slot=%d for peer GID %lx:%lx",
+           slotIdAcc, remGid0acc.global.subnet_prefix, remGid0acc.global.interface_id);
+    } else {
+      sc->nqps = rComm->base.nqps;
+      memcpy(sc->qps, rComm->base.qps, rComm->base.nqps * sizeof(struct ncclIbQp));
+      sc->cq = rComm->devs[0].base.cq;
+      // Transfer CQ ownership to sharedConn so IbCastDestroyBase doesn't double-free
+      for (int iacc = 0; iacc < rComm->base.vProps.ndevs; iacc++) {
+        rComm->devs[iacc].base.ownsCq = false;
+      }
+      sc->inUse = true;
+      rComm->base.sharedConn = sc;
+      int slotIdAcc = -1;
+      NCCLCHECKGOTO(ibSharedConnAllocSlot(ibDev0acc, sc, &rComm->base, &slotIdAcc), ret, fail);
+      rComm->base.slotId = slotIdAcc;
+      INFO(NCCL_NET, "NET/IB: IbCastAccept registered new sharedConn slot=%d for peer GID %lx:%lx",
+           slotIdAcc, remGid0acc.global.subnet_prefix, remGid0acc.global.interface_id);
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
 
   stage->state = ncclIbCommStateSend;
   stage->offset = 0;
@@ -2975,7 +3323,27 @@ static ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int n
 #define WR_IMM_RX_REQ_IDX_SHIFT 24
 #define WR_IMM_SPLIT_DATA_FLAG  0x00800000
 #define WR_IMM_SIZE_MASK        0x007fffff
-  uint32_t immData = slots[nreqs-1].rxReqIndex << WR_IMM_RX_REQ_IDX_SHIFT;
+// When rxSlotId != 0 (QP sharing enabled), use new IMM encoding:
+//   bits[31:29] = rxSlotId (3 bits, 1-7; 0 = legacy/no-sharing)
+//   bits[28:24] = rxReqIndex (5 bits, 0-31)
+//   bit[23]     = SPLIT_DATA_FLAG
+//   bits[22:0]  = size
+#define WR_IMM_SLOT_SHIFT      29
+#define WR_IMM_SLOT_MASK       0x7
+#define WR_IMM_SLOT_REQ_SHIFT  24
+#define WR_IMM_SLOT_REQ_MASK   0x1f
+  // Read rxSlotId from the fifo element (written by receiver in IbCastPostFifo).
+  // When non-zero, use the new shared-CQ IMM encoding so the receiver can
+  // dispatch the completion to the right slot's pending ring.
+  uint8_t rxSlotId = slots[nreqs-1].rxSlotId;
+  uint32_t immData;
+  if (rxSlotId != 0) {
+    // New encoding: bits[31:29]=rxSlotId, bits[28:24]=rxReqIndex(5-bit), bit[23]=SPLIT, bits[22:0]=size
+    uint32_t rxReqIdx5 = slots[nreqs-1].rxReqIndex & WR_IMM_SLOT_REQ_MASK;
+    immData = ((uint32_t)rxSlotId << WR_IMM_SLOT_SHIFT) | (rxReqIdx5 << WR_IMM_SLOT_REQ_SHIFT);
+  } else {
+    immData = slots[nreqs-1].rxReqIndex << WR_IMM_RX_REQ_IDX_SHIFT;
+  }
   if ((nreqs == 1) && (use_write_op == false)) {
     immData |= (reqs[0]->send.size & WR_IMM_SIZE_MASK);
   } else {
@@ -3093,7 +3461,14 @@ static ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int n
       reqs[r]->pInfo[0].nEventHandles++;
     }
 #endif
+    // Lock sendMutex when sharing QPs to prevent concurrent ibv_post_send
+    if (comm->base.sharedConn != NULL) {
+      pthread_mutex_lock(&comm->base.sharedConn->sendMutex);
+    }
     NCCLCHECK(wrap_ibv_post_send(qp->qp, comm->wrs, &bad_wr));
+    if (comm->base.sharedConn != NULL) {
+      pthread_mutex_unlock(&comm->base.sharedConn->sendMutex);
+    }
 
     for (int r=0; r<nreqs; r++) {
       int chunkSize;
@@ -3370,6 +3745,8 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
       localElemCtsInline[i].size = sizes[i]; // Sanity/Debugging
       localElemCtsInline[i].tag = tags[i];
       localElemCtsInline[i].rxReqIndex = rxReqIndex;
+      localElemCtsInline[i].rxSlotId = (comm->base.sharedConn != NULL) ?
+                                        (uint8_t)comm->base.slotId : 0;
       localElemCtsInline[i].idx = comm->remFifo.fifoTail+1;
       localElemRef = (uint64_t)localElemCtsInline;
     } else {
@@ -3381,6 +3758,8 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
       localElem[i].size = sizes[i]; // Sanity/Debugging
       localElem[i].tag = tags[i];
       localElem[i].rxReqIndex = rxReqIndex;
+      localElem[i].rxSlotId = (comm->base.sharedConn != NULL) ?
+                               (uint8_t)comm->base.slotId : 0;
       localElem[i].idx = comm->remFifo.fifoTail+1;
       localElemRef = (uint64_t)localElem;
     }
@@ -3429,17 +3808,33 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
   if (rcclAinicRoce) {
     if (slot == ctsQp->ctsQpSlot) {
       wr.send_flags |= IBV_SEND_SIGNALED;
-      wr.wr_id = req - comm->base.reqs;
+      // Encode slotId in upper 32 bits so IbCastTest can dispatch to correct comm
+      if (comm->base.sharedConn != NULL) {
+        wr.wr_id = ((uint64_t)comm->base.slotId << 32) | (uint64_t)(req - comm->base.reqs);
+      } else {
+        wr.wr_id = req - comm->base.reqs;
+      }
       IbCastAddEvent(req, ctsQp->devIndex, &comm->devs[ctsQp->devIndex].base, true);
     }
   } else if (slot == ctsQp->devIndex) {
     wr.send_flags |= IBV_SEND_SIGNALED;
-    wr.wr_id = req - comm->base.reqs;
+    if (comm->base.sharedConn != NULL) {
+      wr.wr_id = ((uint64_t)comm->base.slotId << 32) | (uint64_t)(req - comm->base.reqs);
+    } else {
+      wr.wr_id = req - comm->base.reqs;
+    }
     IbCastAddEvent(req, ctsQp->devIndex, &comm->devs[ctsQp->devIndex].base, true);
   }
 
   struct ibv_send_wr* bad_wr;
+  // Lock the send mutex when sharing the QP/CQ to prevent concurrent ibv_post_send
+  if (comm->base.sharedConn != NULL) {
+    pthread_mutex_lock(&comm->base.sharedConn->sendMutex);
+  }
   NCCLCHECK(wrap_ibv_post_send(ctsQp->qp, &wr, &bad_wr));
+  if (comm->base.sharedConn != NULL) {
+    pthread_mutex_unlock(&comm->base.sharedConn->sendMutex);
+  }
 
   TRACE(NCCL_VERBS, "Posted send wr_id=%lu, wr_indx=%d, qp_num=%d, src_nic=%d, dst_nic=%d, dlid=%lu, opcode=%d, send_flags=%d, imm_data=%d, remote_addr=%lx, rkey=%x, length=%d, lkey=%x",
         wr.wr_id, 0, ctsQp->qp->qp_num, comm->devs[ctsQp->devIndex].base.ibDevN, comm->base.remDevs[ctsQp->remDevIdx].ibv_dev_index, comm->base.remDevs[ctsQp->remDevIdx].lid,
@@ -3503,7 +3898,13 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
       struct ncclIbQp* qp = comm->base.qps + curQpIndex;
       IbCastAddEvent(req, qp->devIndex, &comm->devs[qp->devIndex].base, false);
       if (comm->base.rxPosts[curQpIndex] < MAX_REQUESTS) {
-        wr.wr_id = curQpIndex;
+        // When sharing a CQ, encode slotId in the upper 32 bits of wr_id so
+        // IbCastTest can dispatch the completion to the correct comm's pending ring.
+        if (comm->base.sharedConn != NULL) {
+          wr.wr_id = ((uint64_t)comm->base.slotId << 32) | (uint32_t)curQpIndex;
+        } else {
+          wr.wr_id = curQpIndex;
+        }
         NCCLCHECK(wrap_ibv_post_recv(qp->qp, &wr, &bad_wr));
         comm->base.rxPosts[curQpIndex]++;
       }
@@ -3614,6 +4015,110 @@ static int getReqQpIndex(struct ncclIbRequest* req, int request, int qpNumber) {
 
 #define NCCL_CQ_POLL_MAX_EVENT        16
 
+// Process a single work completion for a given comm base and device index.
+// Used by both the direct CQ polling path and the shared pending-ring drain path.
+static ncclResult_t IbCastProcessWc(struct ncclIbRequest* r, const struct ibv_wc* wc,
+                                     struct ncclIbNetCommBase* commBase,
+                                     struct ncclIbNetCommDevBase* devBase, int i) {
+  if (wc->status != IBV_WC_SUCCESS) {
+    union ncclSocketAddress addr;
+    ncclSocketGetAddr(r->sock, &addr);
+    char localGidString[INET6_ADDRSTRLEN] = "";
+    char remoteGidString[INET6_ADDRSTRLEN] = "";
+    const char* localGidStr = NULL, *remoteGidStr = NULL;
+    if (devBase->gidInfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
+      localGidStr = ibvGetGidStr(&devBase->gidInfo.localGid, localGidString, sizeof(localGidString));
+      remoteGidStr = ibvGetGidStr(&commBase->remDevs[i].remoteGid, remoteGidString, sizeof(remoteGidString));
+    }
+    char line[SOCKET_NAME_MAXLEN+1];
+    char *hcaName = devBase->pd->context->device->name;
+    WARN("NET/IB: Got completion from peer %s with status=%d opcode=%d len=%u vendor err %u (%s)%s%s%s%s hca %s",
+        ncclSocketToString(&addr, line), wc->status, wc->opcode, wc->byte_len, wc->vendor_err,
+        IbCastReqTypeStr[r->type],
+        localGidStr ?  " localGid ":"", localGidString,
+        remoteGidStr ? " remoteGids":"", remoteGidString, hcaName);
+    return ncclRemoteError;
+  }
+
+  uint64_t wrId;
+  struct ncclIbRemapWrId localRemapWrId;
+  memset(&localRemapWrId, 0, sizeof(struct ncclIbRemapWrId));
+  if (r->type == NCCL_NET_IB_REQ_SEND) {
+    struct ncclIbRemapWrId *remapWrId = (struct ncclIbRemapWrId *) wc->wr_id;
+    assert(remapWrId != NULL);
+    assert(remapWrId->state == NCCL_NET_IB_REMAP_USED);
+    localRemapWrId = *remapWrId;
+    wrId = remapWrId->origWrId;
+    IbCastQpSchedFreeRemap(remapWrId);
+  } else {
+    // Extract lower 32 bits as the real wr_id (upper 32 may hold slotId for shared CQ)
+    wrId = (uint32_t)(wc->wr_id & 0xffffffff);
+  }
+
+  struct ncclIbRequest* req;
+  if (wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+    // Decode the rxReqIndex from imm_data, handling both legacy and slot-encoded formats
+    uint32_t rxSlotBits = (wc->imm_data >> WR_IMM_SLOT_SHIFT) & WR_IMM_SLOT_MASK;
+    if (rxSlotBits != 0) {
+      // New shared encoding: rxReqIndex is 5 bits at bits[28:24]
+      req = commBase->reqs + ((wc->imm_data >> WR_IMM_SLOT_REQ_SHIFT) & WR_IMM_SLOT_REQ_MASK);
+    } else {
+      // Legacy encoding: rxReqIndex is 8 bits at bits[31:24]
+      req = commBase->reqs + ((wc->imm_data >> WR_IMM_RX_REQ_IDX_SHIFT) & WR_IMM_RX_REQ_IDX_MASK);
+    }
+  } else {
+    req = commBase->reqs + (wrId & 0xff);
+  }
+
+  if (req && req->type == NCCL_NET_IB_REQ_SEND) {
+    if (localRemapWrId.parms.enable)
+      IbCastQpSchedUpdateTxStats(&localRemapWrId, commBase);
+
+    for (int j = 0; j < req->nreqs; j++) {
+      struct ncclIbRequest* sendReq = commBase->reqs + ((wrId >> (j*8)) & 0xff);
+      if ((sendReq->events[i] <= 0)) {
+        WARN("NET/IB: sendReq(%p)->events={%d,%d,%d,%d}, i=%d, j=%d <= 0",
+             sendReq, sendReq->events[0], sendReq->events[1], sendReq->events[2], sendReq->events[3], i, j);
+        return ncclInternalError;
+      }
+      sendReq->events[i]--;
+#ifdef NCCL_ENABLE_NET_PROFILING
+      int qpIndex = getReqQpIndex(sendReq, j, wc->qp_num);
+      NCCLCHECK(ncclProfilerFunction(&sendReq->pInfo[j].qpEventHandles[qpIndex], ncclProfilerNetEventStop, NULL, 0, NULL));
+#endif
+    }
+  } else {
+    if (req && wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+      if (req->type != NCCL_NET_IB_REQ_RECV) {
+        WARN("NET/IB: wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM and req->type=%d", req->type);
+        return ncclInternalError;
+      }
+      if (req->nreqs == 1)
+        req->recv.sizes[0] += (wc->imm_data & WR_IMM_SIZE_MASK);
+      int qpIndex = (int)(wrId & 0xffffffff);
+      commBase->rxPosts[qpIndex]--;
+      if (wc->imm_data & WR_IMM_SPLIT_DATA_FLAG)
+        req->events[i]--;
+      else {
+        for (int d = 0; d < NCCL_IB_MAX_DEVS_PER_NIC; d++) {
+          req->events[d] = req->ctsEvents[d];
+        }
+      }
+    } else if (wc->opcode == IBV_WC_RDMA_WRITE) {
+      req->events[i]--;
+      req->ctsEvents[i]--;
+    } else
+      req->events[i]--;
+#ifdef NCCL_ENABLE_NET_PROFILING
+    for (int j = 0; j < req->nreqs; j++) {
+      int qpIndex = getReqQpIndex(req, j, wc->qp_num);
+      NCCLCHECK(ncclProfilerFunction(&req->pInfo[j].qpEventHandles[qpIndex], ncclProfilerNetEventStop, NULL, 0, NULL));
+    }
+#endif
+  }
+  return ncclSuccess;
+}
+
 ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
   struct ncclIbRequest *r = (struct ncclIbRequest*)request;
   *done = 0;
@@ -3653,6 +4158,71 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
       cqMaxPollEvent = NCCL_CQ_POLL_MAX_EVENT;
     }
 
+    // ── Shared-CQ path ────────────────────────────────────────────────────
+    if (r->base->sharedConn != NULL) {
+      struct ncclIbSharedConn* sc = r->base->sharedConn;
+      int mySlot = r->base->slotId;
+
+      // 1. Drain our own pending ring first (completions harvested by another comm's poll)
+      while (sc->pendingHead[mySlot] != sc->pendingTail[mySlot]) {
+        int idx = sc->pendingHead[mySlot] % NCCL_IB_MAX_PENDING_CQE;
+        struct ibv_wc* wc = &sc->pendingCqe[mySlot][idx].wc;
+        // Use devBases[0] as the device base for error reporting (shared CQ is on dev 0)
+        NCCLCHECK(IbCastProcessWc(r, wc, r->base, r->devBases[0], 0));
+        sc->pendingHead[mySlot]++;
+        totalWrDone++;
+      }
+
+      // 2. Poll the shared CQ under the poll mutex
+      pthread_mutex_lock(&sc->pollMutex);
+      int scWrDone = 0;
+      wrap_ibv_poll_cq(sc->cq, cqMaxPollEvent, wcs, &scWrDone);
+      pthread_mutex_unlock(&sc->pollMutex);
+
+      totalWrDone += scWrDone;
+
+      // 3. Dispatch each CQE to the right slot's pending ring or process directly
+      for (int w = 0; w < scWrDone; w++) {
+        struct ibv_wc* wc = wcs + w;
+
+        // Determine which slot this CQE belongs to.
+        // For RECV_RDMA_WITH_IMM: slotId from imm_data bits[31:29]
+        // For other (send/CTS/flush): slotId from wr_id bits[63:32]
+        int cqeSlot;
+        if (wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+          cqeSlot = (int)((wc->imm_data >> WR_IMM_SLOT_SHIFT) & WR_IMM_SLOT_MASK);
+          if (cqeSlot == 0) {
+            // Legacy encoding — assume it belongs to us
+            cqeSlot = mySlot;
+          }
+        } else {
+          cqeSlot = (int)((wc->wr_id >> 32) & 0xffffffff);
+          if (cqeSlot == 0) cqeSlot = mySlot;  // unencoded → ours
+        }
+
+        if (cqeSlot == mySlot) {
+          // Directly process for us
+          NCCLCHECK(IbCastProcessWc(r, wc, r->base, r->devBases[0], 0));
+        } else if (cqeSlot > 0 && cqeSlot < NCCL_IB_MAX_CONN_SLOTS && sc->slots[cqeSlot] != NULL) {
+          // Queue into the target slot's pending ring
+          int spaceLeft = NCCL_IB_MAX_PENDING_CQE -
+                          (sc->pendingTail[cqeSlot] - sc->pendingHead[cqeSlot]);
+          if (spaceLeft > 0) {
+            int tail = sc->pendingTail[cqeSlot] % NCCL_IB_MAX_PENDING_CQE;
+            sc->pendingCqe[cqeSlot][tail].wc = *wc;
+            sc->pendingTail[cqeSlot]++;
+          } else {
+            WARN("NET/IB: pendingCqe ring full for slot %d, dropping CQE", cqeSlot);
+          }
+        }
+      }
+
+      if (totalWrDone == 0) return ncclSuccess;
+      continue;
+    }
+    // ────────────────────────────────────────────────────────────────────
+
+    // ── Non-shared path (original logic) ─────────────────────────────────
     for (int i = 0; i < NCCL_IB_MAX_DEVS_PER_NIC; i++) {
       TIME_START(3);
       // If we expect any completions from this device's CQ
@@ -3664,118 +4234,14 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
         if (wrDone == 0) continue;
         for (int w=0; w<wrDone; w++) {
           struct ibv_wc *wc = wcs+w;
-          if (wc->status != IBV_WC_SUCCESS) {
-            union ncclSocketAddress addr;
-            ncclSocketGetAddr(r->sock, &addr);
-            char localGidString[INET6_ADDRSTRLEN] = "";
-            char remoteGidString[INET6_ADDRSTRLEN] = "";
-            const char* localGidStr = NULL, *remoteGidStr = NULL;
-            if (r->devBases[i]->gidInfo.link_layer == IBV_LINK_LAYER_ETHERNET) {
-              localGidStr = ibvGetGidStr(&r->devBases[i]->gidInfo.localGid, localGidString, sizeof(localGidString));
-              remoteGidStr = ibvGetGidStr(&r->base->remDevs[i].remoteGid, remoteGidString, sizeof(remoteGidString));
-            }
-
-            char line[SOCKET_NAME_MAXLEN+1];
-            char *hcaName = r->devBases[i]->pd->context->device->name;
-            WARN("NET/IB: Got completion from peer %s with status=%d opcode=%d len=%u vendor err %u (%s)%s%s%s%s hca %s",
-                ncclSocketToString(&addr, line), wc->status, wc->opcode, wc->byte_len, wc->vendor_err, IbCastReqTypeStr[r->type],
-                localGidStr ?  " localGid ":"", localGidString, remoteGidStr ? " remoteGids":"", remoteGidString, hcaName);
-            return ncclRemoteError;
-          }
-
-          union ncclSocketAddress addr;
-          ncclSocketGetAddr(r->sock, &addr);
-
-          uint64_t wrId;
-          struct ncclIbRemapWrId localRemapWrId;
-          // memset is to eliminate gcc "may be uninitialized" warning
-          memset(&localRemapWrId, 0, sizeof(struct ncclIbRemapWrId));
-          if (r->type == NCCL_NET_IB_REQ_SEND) {
-            struct ncclIbRemapWrId *remapWrId;
-
-            remapWrId = (struct ncclIbRemapWrId *) wc->wr_id;
-
-            assert(remapWrId != NULL);
-            assert(remapWrId->state == NCCL_NET_IB_REMAP_USED);
-
-            localRemapWrId = *remapWrId;
-            wrId = remapWrId->origWrId;
-            IbCastQpSchedFreeRemap(remapWrId);
-          } else {
-            wrId = wc->wr_id;
-          }
-
-          struct ncclIbRequest* req;
-          if (wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
-            req = r->base->reqs +
-                  ((wc->imm_data >> WR_IMM_RX_REQ_IDX_SHIFT) & WR_IMM_RX_REQ_IDX_MASK);
-	        } else {
-            req = r->base->reqs+(wrId & 0xff);
-          }
-
-          #ifdef ENABLE_TRACE
-          char line[SOCKET_NAME_MAXLEN+1];
-          TRACE(NCCL_NET, "Got completion from peer %s with status=%d opcode=%d len=%u wr_id=%lu r=%p type=%d events={%d,%d,%d,%d}, i=%d",
-            ncclSocketToString(&addr, line), wc->status, wc->opcode,wc->byte_len, wc->wr_id, req, req->type, req->events[0], req->events[1], req->events[2], req->events[3], i);
-          #endif
-          if (req && req->type == NCCL_NET_IB_REQ_SEND) {
-            if (localRemapWrId.parms.enable)
-              IbCastQpSchedUpdateTxStats(&localRemapWrId, r->base);
-
-            for (int j = 0; j < req->nreqs; j++) {
-              struct ncclIbRequest* sendReq = r->base->reqs+((wrId >> (j*8)) & 0xff);
-              if ((sendReq->events[i] <= 0)) {
-                WARN("NET/IB: sendReq(%p)->events={%d,%d,%d,%d}, i=%d, j=%d <= 0", sendReq, sendReq->events[0], sendReq->events[1], sendReq->events[2], sendReq->events[3], i, j);
-                return ncclInternalError;
-              }
-
-              sendReq->events[i]--;
-#ifdef NCCL_ENABLE_NET_PROFILING
-              // Stop Qp event for sendReq
-              int qpIndex = getReqQpIndex(sendReq, j, wc->qp_num);
-              NCCLCHECK(ncclProfilerFunction(&sendReq->pInfo[j].qpEventHandles[qpIndex], ncclProfilerNetEventStop, NULL, 0, NULL));
-#endif
-            }
-          } else {
-            if (req && wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
-              if (req->type != NCCL_NET_IB_REQ_RECV) {
-                WARN("NET/IB: wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM and req->type=%d", req->type);
-                return ncclInternalError;
-              }
-              if (req->nreqs == 1)
-                req->recv.sizes[0] += (wc->imm_data & WR_IMM_SIZE_MASK);
-              int qpIndex = (int) wrId;
-              r->base->rxPosts[qpIndex]--;
-              if (wc->imm_data & WR_IMM_SPLIT_DATA_FLAG)
-                req->events[i]--;
-              else { // Single QP send path
-                // The receiver posted recvs on all QPs, but the sender used a single QP
-                // (no split-data), so only one QP received the RDMA Write with IMM.
-                // Recvs posted on other QPs won't complete for this request.
-                // Reset events to only wait for signaled CTS completions.
-                for (int d = 0; d < NCCL_IB_MAX_DEVS_PER_NIC; d++) {
-                  req->events[d] = req->ctsEvents[d];
-                }
-              }
-            } else if (wc->opcode == IBV_WC_RDMA_WRITE) {
-              req->events[i]--;
-              req->ctsEvents[i]--;
-            } else
-              req->events[i]--;
-#ifdef NCCL_ENABLE_NET_PROFILING
-            // Stop Qp event for workFifo
-            for (int j = 0; j < req->nreqs; j++) {
-              int qpIndex = getReqQpIndex(req, j, wc->qp_num);
-              NCCLCHECK(ncclProfilerFunction(&req->pInfo[j].qpEventHandles[qpIndex], ncclProfilerNetEventStop, NULL, 0, NULL));
-            }
-#endif
-          }
+          NCCLCHECK(IbCastProcessWc(r, wc, r->base, r->devBases[i], i));
         }
         // Once the IB fatal event is reported in the async thread, we want to propagate this error
         // to communicator and prevent further polling to reduce error pollution.
         NCCLCHECK(IbCastStatsCheckFatalCount(&IbCastDevs[r->devBases[i]->ibDevN].stats,__func__));
       }
     }
+    // ──────────────────────────────────────────────────────────────────────
 
     // If no CQEs found on any device, return and come back later
     if (totalWrDone == 0) return ncclSuccess;
@@ -3787,8 +4253,16 @@ ncclResult_t IbCastCloseSend(void* sendComm) {
   if (comm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
-    for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+    if (comm->base.sharedConn != NULL) {
+      // Shared path: release our slot; the shared conn helper will destroy QPs+CQ
+      // when the last reference is released.
+      int ibDevN0 = comm->base.vProps.ndevs > 0 ? comm->base.vProps.devs[0] : 0;
+      NCCLCHECK(ibSharedConnReleaseSlot(IbCastDevs + ibDevN0, comm->base.sharedConn, comm->base.slotId));
+    } else {
+      // Non-shared path: destroy QPs directly
+      for (int q = 0; q < comm->base.nqps; q++)
+        if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+    }
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbSendCommDev* commDev = comm->devs + i;
@@ -3807,8 +4281,15 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
   if (comm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
-    for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+    if (comm->base.sharedConn != NULL) {
+      // Shared path: release our slot
+      int ibDevN0 = comm->base.vProps.ndevs > 0 ? comm->base.vProps.devs[0] : 0;
+      NCCLCHECK(ibSharedConnReleaseSlot(IbCastDevs + ibDevN0, comm->base.sharedConn, comm->base.slotId));
+    } else {
+      // Non-shared path: destroy QPs directly
+      for (int q = 0; q < comm->base.nqps; q++)
+        if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+    }
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbRecvCommDev* commDev = comm->devs + i;
