@@ -26,7 +26,6 @@ extern "C" {
  *
  * Supported hardware:
  *   - AMD AINIC (driver: ionic)
- *   - Broadcom Thor2 (driver: bnxt_re)
  */
 
 /* Maximum constants */
