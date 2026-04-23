@@ -69,7 +69,7 @@ typedef struct {
   /* Source for the four delta counters. ETHTOOL reads port-wide L2 stats;
    * IB_SYSFS reads the per-port RoCE counters under
    *   /sys/class/infiniband/<dev>/ports/1/hw_counters/.
-   * bnxt_en (Thor2) only refreshes its ETHTOOL tx_bytes/rx_bytes every ~1 s,
+   * Some drivers only refresh ETHTOOL tx_bytes/rx_bytes every ~1 s,
    * so short brackets see delta=0; IB sysfs values update per WQE. */
   enum RcclHwcSource source;
   const char* tx_bytes;
@@ -79,7 +79,7 @@ typedef struct {
 } RcclDeltaPatterns;
 
 typedef struct {
-  const char*              name;           /* "ainic" / "thor2" */
+  const char*              name;           /* "ainic" */
   const RcclHwCounterDesc* counters;
   int                      num_counters;
   RcclPfcPatterns          pfc;
@@ -193,101 +193,13 @@ static const RcclHwConfig rcclHwConfigAinic = {
   { HWC_ETHTOOL, "octets_tx_ok", "octets_rx_ok", "frames_tx_ok", "frames_rx_ok" },
 };
 
-/* ------------------------------------------------------------------ */
-/* THOR2 (Broadcom bnxt_re driver)                                     */
-/* ------------------------------------------------------------------ */
-
-static const RcclHwCounterDesc rcclHwcThor2[] = {
-  /* Shared / cross-driver counters.
-   *
-   * CNP counters: newer Thor2 firmwares expose rx_cnp_pkts / tx_cnp_pkts
-   * directly; older firmwares only expose the RoCEv2 congestion-control
-   * state counters (rp_cnp_handled = reaction point received a CNP → "CNP Rx",
-   * np_cnp_sent = notification point sent a CNP → "CNP Tx"). Try the
-   * newer names first and fall back to the older ones. */
-  HWC_FB("rx_cnp_pkts",              HWC_IB_SYSFS, "rx_cnp_pkts", "rp_cnp_handled"),
-  HWC_FB("tx_cnp_pkts",              HWC_IB_SYSFS, "tx_cnp_pkts", "np_cnp_sent"),
-  HWC("rx_roce_discards",            HWC_IB_SYSFS, "rx_roce_discards"),
-  HWC("pfc_rx_frames_total",         HWC_ETHTOOL,  "pfc_pri3_rx_transitions"),
-  HWC("pfc_tx_frames_total",         HWC_ETHTOOL,  "pfc_pri3_tx_transitions"),
-  HWC("hw_rx_dropped",               HWC_ETHTOOL,  "rx_stat_discard"),
-  HWC("hw_tx_dropped",               HWC_IB_SYSFS, "tx_roce_discards"),
-  HWC("rx_errors",                   HWC_IB_SYSFS, "rx_roce_errors"),
-  HWC("to_retransmits",              HWC_IB_SYSFS, "roce_adp_retrans"),
-  HWC("max_retry_exceeded",          HWC_IB_SYSFS, "max_retry_exceeded"),
-  HWC("oos_drop_count",              HWC_IB_SYSFS, "out_of_sequence"),
-  HWC("seq_err_naks_rcvd",           HWC_IB_SYSFS, "packet_seq_err"),
-
-  /* RDMA traffic counters */
-  HWC("tx_rdma_retx_pkts",           HWC_IB_SYSFS, "roce_adp_retrans"),
-  HWC("tx_rdma_ack_timeout",         HWC_IB_SYSFS, "roce_adp_retrans_to"),
-  HWC("rx_rdma_ecn_pkts",            HWC_IB_SYSFS, "np_ecn_marked_roce_packets"),
-
-  /* Requester errors (RX path) */
-  HWC("req_rx_pkt_seq_err",          HWC_IB_SYSFS, "packet_seq_err"),
-  HWC("req_rx_rnr_retry_err",        HWC_IB_SYSFS, "rnr_nak_retry_err"),
-  HWC("req_rx_rmt_acc_err",          HWC_IB_SYSFS, "req_remote_access_errors"),
-  HWC("req_rx_cqe_err",              HWC_IB_SYSFS, "req_cqe_error"),
-  HWC("req_rx_dup_response",         HWC_IB_SYSFS, "bad_resp_err"),
-
-  /* Requester errors (TX path) */
-  HWC("req_tx_retry_excd_err",       HWC_IB_SYSFS, "max_retry_exceeded"),
-  HWC("req_tx_loc_oper_err",         HWC_IB_SYSFS, "local_qp_op_err"),
-
-  /* Responder errors (RX path) */
-  HWC("resp_rx_dup_request",         HWC_IB_SYSFS, "duplicate_request"),
-  HWC("resp_rx_outof_buf",           HWC_IB_SYSFS, "out_of_buffer"),
-  HWC("resp_rx_outouf_seq",          HWC_IB_SYSFS, "out_of_sequence"),
-  HWC("resp_rx_cqe_err",             HWC_IB_SYSFS, "resp_cqe_error"),
-
-  /* RDMA traffic — totals (no ucast/mcast split on bnxt_re) */
-  HWC("tx_rdma_ucast_bytes",         HWC_IB_SYSFS, "tx_bytes"),
-  HWC("tx_rdma_ucast_pkts",          HWC_IB_SYSFS, "tx_pkts"),
-  HWC("rx_rdma_ucast_bytes",         HWC_IB_SYSFS, "rx_bytes"),
-  HWC("rx_rdma_ucast_pkts",          HWC_IB_SYSFS, "rx_pkts"),
-
-  /* Requester errors — additional RX */
-  HWC("req_rx_rmt_req_err",          HWC_IB_SYSFS, "req_remote_invalid_request"),
-  HWC("req_rx_impl_nak_seq_err",     HWC_IB_SYSFS, "implied_nak_seq_err"),
-  HWC("req_rx_cqe_flush",            HWC_IB_SYSFS, "req_cqe_flush_error"),
-
-  /* Requester errors — additional TX */
-  HWC("req_tx_loc_acc_err",          HWC_IB_SYSFS, "local_protection_err"),
-  HWC("req_tx_mem_mgmt_err",         HWC_IB_SYSFS, "mem_mgmt_op_err"),
-
-  /* Responder errors — additional RX */
-  HWC("resp_rx_cqe_flush",           HWC_IB_SYSFS, "resp_cqe_flush_error"),
-  HWC("resp_rx_loc_len_err",         HWC_IB_SYSFS, "resp_local_length_error"),
-
-  /* Responder errors — additional TX */
-  HWC("resp_tx_rmt_inval_req_err",   HWC_IB_SYSFS, "res_rem_inv_err"),
-  HWC("resp_tx_rmt_acc_err",         HWC_IB_SYSFS, "resp_remote_access_errors"),
-  HWC("resp_tx_rmt_oper_err",        HWC_IB_SYSFS, "remote_op_err"),
-};
-
-static const RcclHwConfig rcclHwConfigThor2 = {
-  "thor2",
-  rcclHwcThor2,
-  (int)(sizeof(rcclHwcThor2) / sizeof(rcclHwcThor2[0])),
-  { "rx_pfc_ena_frames_pri%d", "tx_pfc_ena_frames_pri%d", NULL, NULL },
-  /* IB sysfs — bnxt_en's ethtool port-wide tx_bytes/rx_bytes refreshes at
-   * a coarse ~1 s polling interval, making delta_* unreliable for short
-   * brackets. The IB sysfs counters under ports/1/hw_counters/ update per
-   * WQE and match what tx_rdma_ucast_bytes already reports. */
-  { HWC_IB_SYSFS, "tx_bytes", "rx_bytes", "tx_pkts", "rx_pkts" },
-};
-
 /* Compile-time check: per-HW counter arrays must fit in RcclDeviceStats::hw_counters */
 #ifndef __cplusplus
 _Static_assert(sizeof(rcclHwcAinic) / sizeof(rcclHwcAinic[0]) <= RCCL_TELEMETRY_MAX_HWC,
                "AINIC counter table exceeds RCCL_TELEMETRY_MAX_HWC");
-_Static_assert(sizeof(rcclHwcThor2) / sizeof(rcclHwcThor2[0]) <= RCCL_TELEMETRY_MAX_HWC,
-               "THOR2 counter table exceeds RCCL_TELEMETRY_MAX_HWC");
 #else
 static_assert(sizeof(rcclHwcAinic) / sizeof(rcclHwcAinic[0]) <= RCCL_TELEMETRY_MAX_HWC,
               "AINIC counter table exceeds RCCL_TELEMETRY_MAX_HWC");
-static_assert(sizeof(rcclHwcThor2) / sizeof(rcclHwcThor2[0]) <= RCCL_TELEMETRY_MAX_HWC,
-              "THOR2 counter table exceeds RCCL_TELEMETRY_MAX_HWC");
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -297,8 +209,6 @@ static_assert(sizeof(rcclHwcThor2) / sizeof(rcclHwcThor2[0]) <= RCCL_TELEMETRY_M
 static const RcclHwConfig* rcclTelemetryResolveHw(const char* driver_name) {
   if (driver_name == NULL || driver_name[0] == '\0') return NULL;
   if (strcmp(driver_name, "ionic") == 0)               return &rcclHwConfigAinic;
-  if (strcmp(driver_name, "bnxt_re") == 0 ||
-      strcmp(driver_name, "bnxt_en") == 0)             return &rcclHwConfigThor2;
   return NULL;
 }
 
@@ -943,7 +853,7 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
   /* 1. IB sysfs hw_counters (individual reads).
    *    If the primary key read returns -1 (N/A) and a fallback key is
    *    provided, try that too — lets us track counters whose kernel-side
-   *    name changed across firmware/driver revisions (e.g. Thor2 CNP). */
+   *    name changed across firmware/driver revisions. */
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
     if (d->source == HWC_IB_SYSFS && d->key != NULL) {
