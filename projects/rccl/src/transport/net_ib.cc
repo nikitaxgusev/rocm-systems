@@ -142,11 +142,6 @@ NCCL_PARAM(IbDataDirect,"IB_DATA_DIRECT",1);
 NCCL_PARAM(IbQpsPerConn, "IB_QPS_PER_CONNECTION", 1);
 RCCL_PARAM(IbQpsPerP2p, "IB_QPS_PER_P2P", 0);
 
-static int ncclIbQpActive = 0;
-static int ncclIbQpTotal  = 0;
-static int ncclIbQpPeak   = 0;
-NCCL_PARAM(IbQpWarnThreshold, "IB_QP_WARN_THRESHOLD", 4096);
-
 static ncclResult_t ncclIbStatsInit(struct ncclIbStats* stat) {
   __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
   return ncclSuccess;
@@ -175,11 +170,8 @@ static int ncclIbCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const
   int localNqps = qp_multiplier * localNdevs;
   int remoteNqps = qp_multiplier * remoteNdevs;
   int maxNqps = (remoteNqps > localNqps) ? remoteNqps : localNqps;
-  int qpActive = __atomic_load_n(&ncclIbQpActive, __ATOMIC_RELAXED);
-  int qpPeak   = __atomic_load_n(&ncclIbQpPeak, __ATOMIC_RELAXED);
-  int qpTotal  = __atomic_load_n(&ncclIbQpTotal, __ATOMIC_RELAXED);
-  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d (QP active=%d peak=%d total_created=%d)",
-       funcName, maxNqps, localNqps, remoteNqps, qpActive, qpPeak, qpTotal);
+  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d",
+       funcName, maxNqps, localNqps, remoteNqps);
   return maxNqps;
 }
 
@@ -1469,17 +1461,6 @@ ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base, 
   qpInitAttr.cap.max_recv_sge = 1;
   qpInitAttr.cap.max_inline_data = ncclParamIbUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
   NCCLCHECK(wrap_ibv_create_qp(&qp->qp, base->pd, &qpInitAttr));
-  {
-    int total  = __atomic_add_fetch(&ncclIbQpTotal, 1, __ATOMIC_RELAXED);
-    int active = __atomic_add_fetch(&ncclIbQpActive, 1, __ATOMIC_RELAXED);
-    if (active > __atomic_load_n(&ncclIbQpPeak, __ATOMIC_RELAXED))
-      __atomic_store_n(&ncclIbQpPeak, active, __ATOMIC_RELAXED);
-    int threshold = ncclParamIbQpWarnThreshold();
-    if (threshold > 0 && active == threshold)
-      WARN("NET/IB: QP count reached %d (threshold=%d, total_created=%d). "
-           "Risk of QP exhaustion. Consider PXN or reducing QPS_PER_CONNECTION.",
-           active, threshold, total);
-  }
   struct ibv_qp_attr qpAttr;
   memset(&qpAttr, 0, sizeof(struct ibv_qp_attr));
   qpAttr.qp_state = IBV_QPS_INIT;
@@ -3081,10 +3062,7 @@ ncclResult_t ncclIbCloseSend(void* sendComm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) {
-        NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
-        __atomic_sub_fetch(&ncclIbQpActive, 1, __ATOMIC_RELAXED);
-      }
+      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbSendCommDev* commDev = comm->devs + i;
@@ -3104,10 +3082,7 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) {
-        NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
-        __atomic_sub_fetch(&ncclIbQpActive, 1, __ATOMIC_RELAXED);
-      }
+      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbRecvCommDev* commDev = comm->devs + i;
@@ -3119,10 +3094,7 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
           commDev->gpuFlush.gpuMr = nullptr;
           if(commDev->gpuFlush.dmabuf_fd > 0) { close(commDev->gpuFlush.dmabuf_fd);}
         }
-        if (commDev->gpuFlush.qp.qp != NULL) {
-          NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
-          __atomic_sub_fetch(&ncclIbQpActive, 1, __ATOMIC_RELAXED);
-        }
+        if (commDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
       }
       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));
