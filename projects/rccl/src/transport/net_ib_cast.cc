@@ -174,6 +174,8 @@ NCCL_PARAM(IbCastGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 RCCL_PARAM(IbCastCtsInlineData, "CTS_INLINE_DATA", -1);
 RCCL_PARAM(IbCastCtsOffloadEnabled, "CTS_OFFLOAD_ENABLED", -1);
 
+static struct ncclIbQpTracker ncclIbCastQpTracker = {};
+
 extern int64_t rcclParamAinicRoce();
 static ncclResult_t IbCastStatsInit(struct ncclIbStats* stat) {
   __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
@@ -203,7 +205,7 @@ static int ncclIbCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const
   int localNqps = qp_multiplier * localNdevs;
   int remoteNqps = qp_multiplier * remoteNdevs;
   int maxNqps = (remoteNqps > localNqps) ? remoteNqps : localNqps;
-  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d", 
+  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d",
        funcName, maxNqps, localNqps, remoteNqps);
   return maxNqps;
 }
@@ -2063,6 +2065,12 @@ ib_recv_dev_list:
     }
     devIndex = (devIndex + 1) % comm->base.vProps.ndevs;
   }
+  for (int q = 0; q < comm->base.nqps; q++)
+    ncclIbQpTrackCreate(&ncclIbCastQpTracker);
+  INFO(NCCL_NET, "NET/IB: IbCastConnect QPs created (QP active=%d peak=%d total_created=%d)",
+       __atomic_load_n(&ncclIbCastQpTracker.active, __ATOMIC_RELAXED),
+       __atomic_load_n(&ncclIbCastQpTracker.peak, __ATOMIC_RELAXED),
+       __atomic_load_n(&ncclIbCastQpTracker.total, __ATOMIC_RELAXED));
 
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     ncclIbSendCommDev* commDev = comm->devs + i;
@@ -2523,6 +2531,20 @@ ib_recv:
       NCCLCHECKGOTO(IbCastRtrQp(rCommDev->gpuFlush.qp.qp, &rCommDev->base.gidInfo, rCommDev->gpuFlush.qp.qp->qp_num, &devInfo, false, remMeta.tc, remMeta.sl), ret, fail);
       NCCLCHECKGOTO(IbCastRtsQp(rCommDev->gpuFlush.qp.qp), ret, fail);
     }
+  }
+  for (int q = 0; q < rComm->base.nqps; q++)
+    ncclIbQpTrackCreate(&ncclIbCastQpTracker);
+  if (rComm->flushEnabled)
+    for (int i = 0; i < rComm->base.vProps.ndevs; i++)
+      ncclIbQpTrackCreate(&ncclIbCastQpTracker);
+  INFO(NCCL_NET, "NET/IB: IbCastAccept QPs created (QP active=%d peak=%d total_created=%d)",
+       __atomic_load_n(&ncclIbCastQpTracker.active, __ATOMIC_RELAXED),
+       __atomic_load_n(&ncclIbCastQpTracker.peak, __ATOMIC_RELAXED),
+       __atomic_load_n(&ncclIbCastQpTracker.total, __ATOMIC_RELAXED));
+
+  for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
+    rCommDev = rComm->devs + i;
+    ibDev = IbCastDevs + rCommDev->base.ibDevN;
 
     // Fill Handle
     meta.devs[i].lid                            = ibDev->portAttr.lid;
@@ -3788,7 +3810,10 @@ ncclResult_t IbCastCloseSend(void* sendComm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+      if (comm->base.qps[q].qp != NULL) {
+        NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+        ncclIbQpTrackDestroy(&ncclIbCastQpTracker);
+      }
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbSendCommDev* commDev = comm->devs + i;
@@ -3808,7 +3833,10 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
-      if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+      if (comm->base.qps[q].qp != NULL) {
+        NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
+        ncclIbQpTrackDestroy(&ncclIbCastQpTracker);
+      }
 
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbRecvCommDev* commDev = comm->devs + i;
@@ -3820,7 +3848,10 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
           commDev->gpuFlush.gpuMr = nullptr;
           if(commDev->gpuFlush.dmabuf_fd > 0) { close(commDev->gpuFlush.dmabuf_fd);}
         }
-        if (commDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
+        if (commDev->gpuFlush.qp.qp != NULL) {
+          NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
+          ncclIbQpTrackDestroy(&ncclIbCastQpTracker);
+        }
         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
       }
       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));

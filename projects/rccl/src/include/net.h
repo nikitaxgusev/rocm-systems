@@ -67,4 +67,21 @@ extern rcclIBNicInfo rcclPrimaryNic();
 extern bool rcclUseAinic();
 #endif
 
+struct ncclIbQpTracker {
+  int active;
+  int total;
+  int peak;
+};
+
+static inline void ncclIbQpTrackCreate(struct ncclIbQpTracker* t) {
+  int active = __atomic_add_fetch(&t->active, 1, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&t->total, 1, __ATOMIC_RELAXED);
+  if (active > __atomic_load_n(&t->peak, __ATOMIC_RELAXED))
+    __atomic_store_n(&t->peak, active, __ATOMIC_RELAXED);
+}
+
+static inline void ncclIbQpTrackDestroy(struct ncclIbQpTracker* t) {
+  __atomic_sub_fetch(&t->active, 1, __ATOMIC_RELAXED);
+}
+
 #endif
