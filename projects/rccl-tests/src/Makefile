@@ -151,6 +151,12 @@ OBJ_FILES := $(SRC_FILES:%.cu=${DST_DIR}/%.o)
 BIN_FILES_LIST := all_reduce all_gather broadcast reduce_scatter reduce alltoall scatter gather sendrecv alltoallv hypercube all_reduce_bias
 BIN_FILES := $(BIN_FILES_LIST:%=${DST_DIR}/%_perf${NAME_SUFFIX})
 
+# RCCL ncclCommSuspend/Resume/MemStats acceptance gate. Standalone .cpp that
+# does NOT use the perf framework or hipify, so it builds as a plain HIP C++
+# binary linking straight to librccl + libamdhip64.
+SUSPEND_RESUME_BIN := ${DST_DIR}/suspend_resume_smoke
+BIN_FILES += $(SUSPEND_RESUME_BIN)
+
 GIT_VERSION_FILE := ${DST_DIR}/src/git_version.cpp
 GIT_REV          := $(shell git log --pretty=format:'%h' -n 1)
 GIT_DIFF         := $(shell git diff --quiet --exit-code || echo +)
@@ -212,6 +218,11 @@ ${DST_DIR}/%_perf$(NAME_SUFFIX):${DST_DIR}/%.o ${DST_DIR}/common$(NAME_SUFFIX).o
 	echo "$(HIPCC) -o $@ $^ $(HIPLDFLAGS)"
 	$(HIPCC) -o $@ $^ $(HIPLDFLAGS)
 endif
+
+$(SUSPEND_RESUME_BIN): suspend_resume_smoke.cpp
+	@printf "Linking  %-35s > %s\n" $< $@
+	@mkdir -p ${DST_DIR}
+	$(HIPCC) $(HIPCUFLAGS) -o $@ $< $(HIPLDFLAGS)
 
 clean_intermediates:
 	rm -f ${DST_DIR}/*.o $(TEST_VERIFIABLE_OBJS)

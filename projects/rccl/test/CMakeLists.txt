@@ -56,16 +56,15 @@ if(BUILD_TESTS)
 
     message(STATUS "Using MPI installation at: ${MPI_PATH}")
 
-    # Find required MPI library
+    # Find required MPI library (parent dir fallback covers Debian multiarch layouts)
     find_library(MPI_LIBRARY
         NAMES mpi
-        PATHS ${MPI_PATH}/lib ${MPI_PATH}/lib64
-        NO_DEFAULT_PATH
+        PATHS ${MPI_PATH}/lib ${MPI_PATH}/lib64 ${MPI_PATH}/..
         REQUIRED
     )
 
     if(NOT MPI_LIBRARY)
-        message(FATAL_ERROR "Could not find MPI library (libmpi.so) in ${MPI_PATH}/lib or ${MPI_PATH}/lib64")
+        message(FATAL_ERROR "Could not find libmpi.so in ${MPI_PATH}/{lib,lib64} or parent directory")
     endif()
 
     # Set up MPI variables
@@ -260,14 +259,28 @@ if(BUILD_TESTS)
       common/MPITestCore.cpp
       common/MPIEnvironment.cpp
       common/TestChecks.cpp
-      transport/TransportMPIBase.cpp
-      transport/P2pMPITests.cpp
-      transport/NetMPITests.cpp
-      transport/ShmMPITests.cpp
-      transport/NetIbMPITests.cpp
       ImplicitLaunchOrderMPITests.cpp
       RegistrationMPITests.cpp
+      SuspendResumeMPITests.cpp
     )
+
+    if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
+      list(APPEND MPI_TEST_SOURCE_FILES
+        ${PROJECT_BINARY_DIR}/hipify/src/misc/utils.cc
+        ${PROJECT_BINARY_DIR}/hipify/src/debug.cc
+        ${PROJECT_BINARY_DIR}/hipify/src/misc/param.cc
+      )
+    endif()
+
+    if(CMAKE_BUILD_TYPE MATCHES "Debug")
+      list(APPEND MPI_TEST_SOURCE_FILES
+        transport/TransportMPIBase.cpp
+        transport/P2pMPITests.cpp
+        transport/NetMPITests.cpp
+        transport/ShmMPITests.cpp
+        transport/NetIbMPITests.cpp
+      )
+    endif()
 
     add_executable(rccl-UnitTestsMPI ${MPI_TEST_SOURCE_FILES})
     list(APPEND RCCL_TEST_EXECUTABLES rccl-UnitTestsMPI)

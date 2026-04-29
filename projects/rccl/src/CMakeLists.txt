@@ -14,6 +14,7 @@ set(SRC_FILES
   src/channel.cc
   src/collectives.cc
   src/commDump.cc
+  src/mem_manager.cc
   src/debug.cc
   src/dev_runtime.cc
   src/enqueue.cc
@@ -98,6 +99,7 @@ set(SRC_FILES
   src/include/ibvwrap.h
   src/include/info.h
   src/include/ipcsocket.h
+  src/include/mem_manager.h
   src/include/mnnvl.h
   src/include/nccl_common.h
   src/include/nccl_device.h

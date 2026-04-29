@@ -150,3 +150,16 @@ add_rccl_test(reduce)
 add_rccl_test(scatter)
 add_rccl_test(sendrecv)
 add_rccl_test(all_reduce_bias)
+
+# RCCL suspend/resume acceptance gate. Bypasses the perf framework / hipify
+# pipeline because it doesn't need MPI or the rccl-tests benchmark scaffolding;
+# it links straight against rccl + hip and exercises the new ncclCommSuspend /
+# ncclCommResume / ncclCommMemStats public API in single-rank and multi-rank
+# (threaded) configurations.
+add_executable(suspend_resume_smoke "${CMAKE_CURRENT_SOURCE_DIR}/suspend_resume_smoke.cpp")
+target_link_libraries(suspend_resume_smoke PRIVATE roc::rccl hip::device Threads::Threads)
+set_target_properties(suspend_resume_smoke PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;${ROCM_PATH}/lib")
+add_relative_test(suspend_resume_smoke suspend_resume_smoke)
+rocm_install(TARGETS suspend_resume_smoke)
