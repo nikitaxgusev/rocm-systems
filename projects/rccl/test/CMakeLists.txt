@@ -268,6 +268,7 @@ if(BUILD_TESTS)
       ImplicitLaunchOrderMPITests.cpp
       RegistrationMPITests.cpp
       RevokeMPITests.cpp
+      RevokeGapMPITests.cpp
       RevokeStressMPITests.cpp
       RevokeShrinkDeepStressMPITests.cpp
       RevokeShrinkAdvancedMPITests.cpp
