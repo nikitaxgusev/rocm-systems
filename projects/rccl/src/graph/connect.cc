@@ -1082,6 +1082,71 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
     }
   }
 
+  // Grow fix: repair broken intra-node ring entries caused by independent
+  // ncclTopoCompute in the new rank.
+  //
+  // When a new rank joins via ncclCommGrow it runs ncclTopoCompute independently.
+  // repairMissingChannels() copies ch-0 to ch-c only when BOTH ringPrev[c] and
+  // ringNext[c] are -1.  The new rank can compute non-(-1) but *wrong* intra-node
+  // values (reversed ordering) for c >= 1, causing the repair to be skipped.
+  //
+  // The intra-node prev/next does not change across channels -- counter-rotation
+  // is handled at the inter-node level via ringRecv/ringSend.  So the correct
+  // fix for any rank R on channel c whose intra-node chain is broken is to copy
+  // from channel 0.
+  //
+  // A rank R is broken on channel c when its stored ringPrev[c] points to a
+  // same-node rank P, but P's ringNext[c] does not point back to R (or vice
+  // versa for ringNext[c] / ringPrev[c]).  We iterate until stable because fixing
+  // one rank can expose another (rare, but possible in multi-rank-grow).
+  //
+  // NOTE: not gated on comm->isGrow.  At >=8 nodes (64 ranks) ncclTopoCompute
+  // can produce divergent per-rank intra-node ring orderings even during
+  // initial buildComm (not just during ncclCommGrow), so initial buildComm of
+  // a 64-rank world (e.g. GrowMPITest.ShrinkThenGrow / GetUniqueId_* /
+  // Grow_ExistingRankBadRankArg / Grow_NewRankNRanksEqualExisting) fails with
+  // "internal error" if this loop is gated.  The check is inherently safe:
+  // it only mutates state when bilateral asymmetry is detected, which is a
+  // no-op on symmetric topologies (smaller node counts).
+  {
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (int R = 0; R < nranks; R++) {
+        int nodeR = comm->rankToNode[R];
+        for (int c = 1; c < nChannels; c++) {
+          int myPrev = allTopoRanks[R]->ringPrev[c];
+          int myNext = allTopoRanks[R]->ringNext[c];
+          // If myPrev is a same-node rank that doesn't point back to R: broken.
+          bool prevBroken = (myPrev >= 0 && myPrev < nranks &&
+                             comm->rankToNode[myPrev] == nodeR &&
+                             allTopoRanks[myPrev]->ringNext[c] != R);
+          // If myNext is a same-node rank that doesn't point back to R: broken.
+          bool nextBroken = (myNext >= 0 && myNext < nranks &&
+                             comm->rankToNode[myNext] == nodeR &&
+                             allTopoRanks[myNext]->ringPrev[c] != R);
+          if (prevBroken || nextBroken) {
+            // Copy all four intra-node ring fields from ch0. The ringSend/ringRecv
+            // on rank 63 ch1 are also broken (independent ncclTopoCompute produced
+            // wrong boundary ranks), so we must fix them too. For all existing ranks
+            // on this node ch0==ch1 for all four fields, so ch0 is the correct source.
+            INFO(NCCL_GRAPH,
+                 "Grow ring fix: rank %d ch %d prev %d->%d next %d->%d ringSend %d->%d ringRecv %d->%d",
+                 R, c, myPrev, allTopoRanks[R]->ringPrev[0],
+                        myNext, allTopoRanks[R]->ringNext[0],
+                        allTopoRanks[R]->ringSend[c], allTopoRanks[R]->ringSend[0],
+                        allTopoRanks[R]->ringRecv[c], allTopoRanks[R]->ringRecv[0]);
+            allTopoRanks[R]->ringPrev[c]   = allTopoRanks[R]->ringPrev[0];
+            allTopoRanks[R]->ringNext[c]   = allTopoRanks[R]->ringNext[0];
+            allTopoRanks[R]->ringSend[c]   = allTopoRanks[R]->ringSend[0];
+            allTopoRanks[R]->ringRecv[c]   = allTopoRanks[R]->ringRecv[0];
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
   for (int c=0; c<nChannels;c++) {
     for (int n=0; n<nNodes; n++) {
       int r = firstRanks[n];
@@ -1120,13 +1185,71 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
     // Connect rings and trees. This should also duplicate the channels.
     NCCLCHECK(connectRings(comm, ringRecv, ringSend, ringPrev, ringNext));
   }
-  
+
 
   // [RCCL] Connect rail-optimized trees
   if (comm->topo->useRailOptimizedTrees) {
     NCCLCHECK(connectRailOptimizedTrees(comm, treeToParent, treeToChild0, treeToChild1));
   } else {
     NCCLCHECK(connectTrees(comm, treeToParent, treeToChild0, treeToChild1, treePatterns));
+  }
+
+  // [Grow] Intra-node tree fix (analogous to the ring fix above).
+  //
+  // A rank that joins via ncclCommGrow runs ncclTopoCompute independently and
+  // can produce a different intra-node tree ordering for some channels than
+  // the existing ranks on its node.  Each rank's intra-node tree.up /
+  // tree.down[0] was set in ncclTopoPreset from that rank's own treeIntra, so
+  // an asymmetric ordering leaves bilateral inconsistencies that cause the
+  // tree transport to deadlock (e.g. rank R thinks rank P is its intra child,
+  // but P -- which uses its own treeIntra -- doesn't reciprocate).
+  //
+  // Detection: compare this rank's treeToParent[c] / treeToChild0[c] (which
+  // equal treeIntra[0] and treeIntra[1] in BALANCED_TREE / SPLIT_TREE) with
+  // the canonical view -- firstRanks[node].  If they disagree, this rank's
+  // intra-tree differs from the rest of the node.  Channel 0's intra-tree is
+  // universally consistent across ranks (the same anchor used by the ring
+  // fix), so copy this rank's tree.up / tree.down[0] from ch 0 to ch c.  The
+  // post-preset memcpy duplicate (ch c + nChannels) is fixed in lockstep.
+  //
+  // Existing ranks (whose intra-trees match the canonical) pass the check and
+  // are left untouched -- preserving legitimate ch>=1 orderings such as the
+  // wrap-around chain where a higher-localRank rank has a lower-localRank
+  // intra-child.
+  //
+  // Not gated on comm->isGrow for the same reason as the ring fix above: at
+  // >=8 nodes (64 ranks) initial buildComm also exhibits per-rank intra-node
+  // tree divergence, so gating on isGrow regresses several non-grow paths
+  // (ShrinkThenGrow's initial buildComm, etc.).  The check is inherently
+  // safe -- it is a no-op when every same-node rank agrees with firstRank's
+  // view (the common case at smaller node counts).
+  {
+    int myRank = comm->rank;
+    int myNode = comm->rankToNode[myRank];
+    int firstRank = firstRanks[myNode];
+    int dupBase = (nChannels <= MAXCHANNELS / 2) ? nChannels : 0;
+    for (int c = 1; c < nChannels; c++) {
+      int myParent = allTopoRanks[myRank]->treeToParent[c];
+      int canonParent = allTopoRanks[firstRank]->treeToParent[c];
+      int myChild0 = allTopoRanks[myRank]->treeToChild0[c];
+      int canonChild0 = allTopoRanks[firstRank]->treeToChild0[c];
+      if (myParent != canonParent || myChild0 != canonChild0) {
+        INFO(NCCL_GRAPH,
+             "Grow tree fix: rank %d ch %d intra disagrees with canon (firstRank %d): "
+             "treeToParent %d vs %d, treeToChild0 %d vs %d; "
+             "copying ch0 intra: up %d->%d down0 %d->%d",
+             myRank, c, firstRank,
+             myParent, canonParent, myChild0, canonChild0,
+             comm->channels[c].tree.up, comm->channels[0].tree.up,
+             comm->channels[c].tree.down[0], comm->channels[0].tree.down[0]);
+        comm->channels[c].tree.up      = comm->channels[0].tree.up;
+        comm->channels[c].tree.down[0] = comm->channels[0].tree.down[0];
+        if (dupBase && c + dupBase < MAXCHANNELS) {
+          comm->channels[c + dupBase].tree.up      = comm->channels[c].tree.up;
+          comm->channels[c + dupBase].tree.down[0] = comm->channels[c].tree.down[0];
+        }
+      }
+    }
   }
 
   // Dump graphviz-friendly trees
