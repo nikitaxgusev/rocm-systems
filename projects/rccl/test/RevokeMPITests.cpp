@@ -801,8 +801,19 @@ TEST_F(RevokeMPITest, RepeatedRevokeShrinkCycles_ResourceCleanup)
     ASSERT_MPI_EQ(ncclSuccess,
                   ncclAllReduce(send_buf, recv_buf, kCount, ncclFloat, ncclSum, parent, stream));
 
-    ASSERT_MPI_EQ(ncclSuccess, ncclCommRevoke(parent, NCCL_REVOKE_DEFAULT));
+    // Drain the user stream before revoking the parent. ncclCommRevoke's
+    // async cleanup only synchronizes the comm's internal streams
+    // (sharedRes->hostStream and sharedRes->deviceStream) and then clears
+    // the abort flag back to 0 after ncclProxyStop has torn down peer
+    // sockets. If the user-stream AllReduce kernel is still polling for
+    // peer data when those steps interleave, it can miss the abort-flag
+    // transition (0 -> 1 -> 0) and end up waiting for data the stopped
+    // proxy will never deliver. This test only needs to verify resource
+    // cleanup across generations, not in-flight revoke behavior, so the
+    // canonical NCCL/torchcomms order is queue -> sync -> revoke. The
+    // child branch below already follows that order.
     HIP_TEST_CHECK_GTEST_FAIL(hipStreamSynchronize(stream));
+    ASSERT_MPI_EQ(ncclSuccess, ncclCommRevoke(parent, NCCL_REVOKE_DEFAULT));
     MPI_Barrier(MPI_COMM_WORLD);
 
     std::vector<int> excludeList;
