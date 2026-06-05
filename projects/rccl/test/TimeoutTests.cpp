@@ -98,6 +98,14 @@ TEST(TimeoutTests, SetAsyncErrorRejectsOutOfRange)
     FreeComm(comm);
 }
 
+// The same guard rejects a NULL comm. ncclTimeout is in range, so this proves
+// the comm==NULL arm fires independently of the range check -- otherwise a
+// valid-code/NULL-comm call would dereference null on the store below.
+TEST(TimeoutTests, SetAsyncErrorRejectsNullComm)
+{
+    EXPECT_EQ(ncclCommSetAsyncError(nullptr, ncclTimeout), ncclInvalidArgument);
+}
+
 // End-to-end pipeline: set ncclTimeout, read it back via the public getter,
 // and confirm the getter-returned code stringifies to "timeout".
 TEST(TimeoutTests, GetAsyncErrorRoundTripsTimeout)
