@@ -60,7 +60,8 @@ typedef struct { char internal[NCCL_UNIQUE_ID_BYTES]; /*!< Opaque array>*/} nccl
     ncclInvalidUsage            =  5, /*!< Invalid usage */
     ncclRemoteError             =  6, /*!< Remote process exited or there was a network error */
     ncclInProgress              =  7, /*!< RCCL operation in progress */
-    ncclNumResults              =  8  /*!< Number of result types */
+    ncclTimeout                 =  8, /*!< Operation timed out */
+    ncclNumResults              =  9  /*!< Number of result types */
   } ncclResult_t;
 /*! @} */
 
