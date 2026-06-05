@@ -433,6 +433,11 @@
           "name": "XmlTest",
           "description": "XML topology parsing tests",
           "test_filter": "XmlTest.*"
+        },
+        {
+          "name": "TimeoutTests",
+          "description": "ncclTimeout result-code unit tests: enum identity/ordering, ncclGetErrorString mapping, and ncclCommSetAsyncError/GetAsyncError range-guard and round-trip coverage",
+          "test_filter": "TimeoutTests.*"
         }
       ]
     },
@@ -1798,6 +1803,32 @@
       ]
     },
 
+    "timeout_mpi_tests": {
+      "extends": "default",
+      "is_gtest": true,
+      "binary": "rccl-UnitTestsMPI",
+      "num_ranks": 2,
+      "num_nodes": 1,
+      "num_gpus": 2,
+      "timeout": 180,
+      "env_variables": {
+        "NCCL_DEBUG": "INFO",
+        "RCCL_MPI_LOG_ALL_RANKS": "1"
+      },
+      "tests": [
+        {
+          "name": "Timeout_AsyncErrorRoundTripOnLiveComm",
+          "description": "Inject ncclTimeout via ncclCommSetAsyncError on a live comm, read it back on every rank, clear it, then verify a real AllReduce still succeeds and the comm reports healthy",
+          "test_filter": "TimeoutMPITest.AsyncErrorRoundTripOnLiveComm"
+        },
+        {
+          "name": "Timeout_ErrorStringConsistentAcrossRanks",
+          "description": "ncclGetErrorString(ncclTimeout) maps to \"timeout\" identically on every rank/node",
+          "test_filter": "TimeoutMPITest.ErrorStringConsistentAcrossRanks"
+        }
+      ]
+    },
+
     "net_ib_initialization_cast": {
       "extends": "net_ib_initialization",
       "env_variables": { "NCCL_NET": "ib-cast" }
@@ -2152,6 +2183,12 @@
       "name": "Grow MPI Tests - Multi-Node (4-rank, 2-node)",
       "description": "ncclCommGrow multi-node scenarios over IB transport: grow with SendRecv/AllReduce over network, parent destroy with IB teardown, elastic grow/shrink cycles over IB, and non-blocking grow with IB connection setup",
       "config": "grow_mpi_tests_multinode",
+      "enabled": true
+    },
+    {
+      "name": "Timeout MPI Tests (2-rank)",
+      "description": "ncclTimeout result-code coverage at 2 ranks on a single node: async-error round-trip on a live communicator with post-clear AllReduce health check, and cross-rank ncclGetErrorString consistency",
+      "config": "timeout_mpi_tests",
       "enabled": true
     },
     {
