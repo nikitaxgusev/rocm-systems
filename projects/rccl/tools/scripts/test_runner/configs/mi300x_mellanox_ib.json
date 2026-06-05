@@ -514,6 +514,11 @@
           "name": "XmlTest",
           "description": "XML topology parsing tests",
           "test_filter": "XmlTest.*"
+        },
+        {
+          "name": "TimeoutTests",
+          "description": "ncclTimeout result-code unit tests: enum identity/ordering, ncclGetErrorString mapping, and ncclCommSetAsyncError/GetAsyncError range-guard and round-trip coverage",
+          "test_filter": "TimeoutTests.*"
         }
       ]
     },
@@ -1879,6 +1884,84 @@
       ]
     },
 
+    "timeout_mpi_tests": {
+      "extends": "default",
+      "is_gtest": true,
+      "binary": "rccl-UnitTestsMPI",
+      "num_ranks": 2,
+      "num_nodes": 1,
+      "num_gpus": 2,
+      "timeout": 180,
+      "env_variables": {
+        "NCCL_DEBUG": "INFO",
+        "RCCL_MPI_LOG_ALL_RANKS": "1"
+      },
+      "tests": [
+        {
+          "name": "Timeout_AsyncErrorRoundTripOnLiveComm",
+          "description": "Inject ncclTimeout via ncclCommSetAsyncError on a live comm, read it back on every rank, clear it, then verify a real AllReduce still succeeds and the comm reports healthy",
+          "test_filter": "TimeoutMPITest.AsyncErrorRoundTripOnLiveComm"
+        },
+        {
+          "name": "Timeout_AsyncErrorClearableOnLiveComm",
+          "description": "Set then clear ncclTimeout on a live comm; every rank must read back ncclSuccess (an observed-and-cleared timeout is not permanent)",
+          "test_filter": "TimeoutMPITest.AsyncErrorClearableOnLiveComm"
+        },
+        {
+          "name": "Timeout_ErrorStringConsistentAcrossRanks",
+          "description": "ncclGetErrorString(ncclTimeout) maps to \"timeout\" identically on every rank/node",
+          "test_filter": "TimeoutMPITest.ErrorStringConsistentAcrossRanks"
+        }
+      ]
+    },
+
+    "lsa_barrier_timeout_mpi_tests": {
+      "extends": "default",
+      "is_gtest": true,
+      "binary": "rccl-UnitTestsMPI",
+      "num_ranks": 2,
+      "num_nodes": 1,
+      "num_gpus": 2,
+      "timeout": 300,
+      "env_variables": {
+        "NCCL_DEBUG": "INFO",
+        "NCCL_CUMEM_ENABLE": "1",
+        "RCCL_MPI_LOG_ALL_RANKS": "1"
+      },
+      "tests": [
+        {
+          "name": "LsaBarrierTimeout_AllTests",
+          "description": "Device-side LSA barrier ncclTimeout producer: healthy->ncclSuccess, absent-peer->ncclTimeout, zero-budget, repeated-healthy, recovery, and back-to-back timeout stress. Skips uniformly when symmetric memory is unavailable (kernel < 6.8).",
+          "test_filter": "LsaBarrierTimeoutMPITest.*"
+        }
+      ]
+    },
+
+    "gin_barrier_timeout_mpi_tests": {
+      "extends": "default",
+      "is_gtest": true,
+      "binary": "rccl-UnitTestsMPI",
+      "num_ranks": 2,
+      "num_nodes": 1,
+      "num_gpus": 2,
+      "timeout": 300,
+      "env_variables": {
+        "NCCL_DEBUG": "INFO",
+        "NCCL_GIN_ENABLE": "1",
+        "NCCL_GIN_TYPE": "2",
+        "NCCL_CUMEM_ENABLE": "1",
+        "RCCL_ENABLE_INTRANET": "1",
+        "RCCL_MPI_LOG_ALL_RANKS": "1"
+      },
+      "tests": [
+        {
+          "name": "GinBarrierTimeout_AllTests",
+          "description": "Device-side GIN rail-barrier ncclTimeout producer: healthy->ncclSuccess, absent-peer->ncclTimeout, zero-budget, repeated-healthy, recovery, and back-to-back timeout stress. Skips uniformly when GIN/symmetric prerequisites are unmet.",
+          "test_filter": "GinBarrierTimeoutMPITest.*"
+        }
+      ]
+    },
+
     "net_ib_initialization_cast": {
       "extends": "net_ib_initialization",
       "env_variables": { "NCCL_NET": "ib-cast" }
@@ -2255,6 +2338,24 @@
       "name": "Grow MPI Tests - Multi-Node (4-rank, 2-node)",
       "description": "ncclCommGrow multi-node scenarios over IB transport: grow with SendRecv/AllReduce over network, parent destroy with IB teardown, elastic grow/shrink cycles over IB, and non-blocking grow with IB connection setup",
       "config": "grow_mpi_tests_multinode",
+      "enabled": true
+    },
+    {
+      "name": "Timeout MPI Tests (2-rank)",
+      "description": "ncclTimeout host-side async-error coverage at 2 ranks: live-comm round-trip with post-clear AllReduce health, clearable state, and cross-rank ncclGetErrorString consistency",
+      "config": "timeout_mpi_tests",
+      "enabled": true
+    },
+    {
+      "name": "LSA Barrier Timeout MPI Tests (2-rank)",
+      "description": "Device-side LSA barrier ncclTimeout producer at 2 ranks: healthy/absent-peer/zero-budget/repeated/recovery/back-to-back. Skips when symmetric memory is unavailable (kernel < 6.8)",
+      "config": "lsa_barrier_timeout_mpi_tests",
+      "enabled": true
+    },
+    {
+      "name": "GIN Barrier Timeout MPI Tests (2-rank)",
+      "description": "Device-side GIN rail-barrier ncclTimeout producer at 2 ranks: healthy/absent-peer/zero-budget/repeated/recovery/back-to-back. Skips when GIN/symmetric prerequisites are unmet",
+      "config": "gin_barrier_timeout_mpi_tests",
       "enabled": true
     },
     {

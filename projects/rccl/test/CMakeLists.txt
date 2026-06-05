@@ -249,6 +249,7 @@ if(BUILD_TESTS)
       ProxyTests.cpp
       RcclWrapTests.cpp
       TransportTests.cpp
+      TimeoutTests.cpp
       mem_manager/MemManagerTests.cpp
       graph/XmlTests.cpp
       common/main_fixtures.cpp
@@ -315,6 +316,9 @@ if(BUILD_TESTS)
       ce/CeMPITests.cpp
       ce/CeInternalMPITests.cpp
       GrowMPITests.cpp
+      TimeoutMPITests.cpp
+      transport/LsaBarrierTimeoutMPITests.cpp
+      transport/GinBarrierTimeoutMPITests.cpp
     )
 
     add_executable(rccl-UnitTestsMPI ${MPI_TEST_SOURCE_FILES})
