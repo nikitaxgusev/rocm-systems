@@ -18,7 +18,8 @@ typedef enum {
     ncclInvalidUsage            =  5,
     ncclRemoteError             =  6,
     ncclInProgress              =  7,
-    ncclNumResults              =  8
+    ncclTimeout                 =  8,
+    ncclNumResults              =  9
 } ncclResult_t;
 
 #endif // NCCL_H_

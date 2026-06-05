@@ -25,7 +25,6 @@
 #include "nccl.h"
 
 #include <cstring>
-#include <vector>
 
 #ifdef MPI_TESTS_ENABLED
 
@@ -114,8 +113,8 @@ TEST_F(TimeoutMPITest, ErrorStringConsistentAcrossRanks)
     const char* s = ncclGetErrorString(ncclTimeout);
     ASSERT_MPI_TRUE(s != nullptr && std::strcmp(s, "timeout") == 0);
 
-    // Hash the string and AllReduce(min/max) the length to confirm every rank
-    // produced the same value.
+    // AllReduce(min/max) the string length to confirm every rank produced the
+    // same value.
     int len    = static_cast<int>(std::strlen(s));
     int lenMin = len;
     int lenMax = len;

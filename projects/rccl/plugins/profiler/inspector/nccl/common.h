@@ -44,7 +44,8 @@ typedef enum { ncclSuccess                 =  0,
                ncclInvalidUsage            =  5,
                ncclRemoteError             =  6,
                ncclInProgress              =  7,
-               ncclNumResults              =  8 } ncclResult_t;
+               ncclTimeout                 =  8,
+               ncclNumResults              =  9 } ncclResult_t;
 
 
 typedef enum {
