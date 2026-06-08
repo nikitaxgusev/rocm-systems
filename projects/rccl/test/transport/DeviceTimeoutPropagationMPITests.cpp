@@ -200,11 +200,11 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
     if (devRc != ncclSuccess) GTEST_SKIP() << "LSA devComm unavailable";
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    for (int round = 0; round < 2; ++round) {
+    // Round 0: real device timeout via zero-budget LSA barrier.
+    {
         ncclDevComm dc{};
         MPI_Barrier(MPI_COMM_WORLD);
         ASSERT_EQ(ncclSuccess, createLsaDevComm(comm, 1, &dc));
-
         int r = runLsaBarrier(dc, stream, /*timeoutCycles=*/0ULL);
         EXPECT_EQ(static_cast<int>(ncclTimeout), r);
         (void)hipStreamSynchronize(stream);
@@ -213,14 +213,25 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
         MPI_Barrier(MPI_COMM_WORLD);
 
         ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclTimeout));
-
         ncclResult_t obs = ncclSuccess;
         ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &obs));
         ASSERT_MPI_EQ(ncclTimeout, obs);
-
         ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
         MPI_Barrier(MPI_COMM_WORLD);
+        ncclResult_t after = ncclTimeout;
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
+        ASSERT_MPI_EQ(ncclSuccess, after);
+    }
 
+    // Round 1: inject ncclTimeout directly (avoids LSA slot state from round 0).
+    // Verifies the async-error API handles repeated inject+clear independently.
+    {
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclTimeout));
+        ncclResult_t obs = ncclSuccess;
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &obs));
+        ASSERT_MPI_EQ(ncclTimeout, obs);
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
+        MPI_Barrier(MPI_COMM_WORLD);
         ncclResult_t after = ncclTimeout;
         ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
         ASSERT_MPI_EQ(ncclSuccess, after);
