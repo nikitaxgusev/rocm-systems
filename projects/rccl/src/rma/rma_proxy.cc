@@ -338,12 +338,24 @@ ncclResult_t ncclRmaProxyDestroyContext(ncclGin_t* ginComm, void* rmaProxyCtx){
   // Free signals
   if (ginComm && ctx->ginCollComm && ctx->signalsMhandle)
     NCCLCHECK(ginComm->deregMrSym(ctx->ginCollComm, ctx->signalsMhandle));
+  // signalsDev/flushBufDev are allocated with hipExtMallocWithFlags on HIP (see
+  // ncclRmaProxyCreateContext), so they must be freed with hipFree — NOT ncclCudaFree,
+  // which routes to the cuMem path (cuMemRetainAllocationHandle) when NCCL_CUMEM_ENABLE=1
+  // and faults on a non-cuMem pointer.
+#if !defined(__HIP_PLATFORM_AMD__) && ! defined(__HIPCC__)
   if (ctx->signalsDev) NCCLCHECK(ncclCudaFree(ctx->signalsDev, ctx->comm->memManager));
+#else
+  if (ctx->signalsDev) CUDACHECK(hipFree(ctx->signalsDev));
+#endif
 
   // Free flush buffer
   if (ginComm && ctx->ginCollComm && ctx->flushBufMhandle)
     ginComm->deregMrSym(ctx->ginCollComm, ctx->flushBufMhandle);
+#if !defined(__HIP_PLATFORM_AMD__) && ! defined(__HIPCC__)
   if (ctx->flushBufDev) ncclCudaFree(ctx->flushBufDev, ctx->comm->memManager);
+#else
+  if (ctx->flushBufDev) CUDACHECK(hipFree(ctx->flushBufDev));
+#endif
 
   // Free CPU-accessible signals
   if (ginComm && ctx->ginCollComm && ctx->cpuAccessSignalsMhandle)
