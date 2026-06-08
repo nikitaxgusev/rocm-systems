@@ -305,10 +305,13 @@ TEST_F(LsaBarrierTimeoutMPITest, BackToBackTimeouts)
             int r = runOneBarrier(dc, stream, kShortTimeoutCycles);
             if (r == static_cast<int>(ncclTimeout)) ++timeouts;
         }
-        // Barrier before destroy: absent rank must not tear down its symmetric
-        // memory slot while the present rank kernel is still timeout-spinning.
+        // Sync after kernel: absent rank must not race ahead to the next
+        // createLsaDevComm (or destroy) while rank 0 is still timeout-spinning.
         MPI_Barrier(MPI_COMM_WORLD);
         (void)ncclDevCommDestroy(comm, &dc);
+        // Sync after destroy: prevent the next createLsaDevComm from starting
+        // before all ranks have finished tearing down the previous devComm.
+        MPI_Barrier(MPI_COMM_WORLD);
     }
     if (!isAbsent) EXPECT_EQ(kRounds, timeouts);
     MPI_Barrier(MPI_COMM_WORLD);
