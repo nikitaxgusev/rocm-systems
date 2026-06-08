@@ -28,6 +28,11 @@
  *
  * The GIN barrier requires a GIN-capable build + symmetric memory + GIN proxy
  * connectivity (NCCL_GIN_TYPE=2, NCCL_CUMEM_ENABLE=1, intranet on single node).
+ *
+ * IMPORTANT: Run with exactly 1 MPI rank per node (--map-by ppr:1:node) so that
+ * each MPI rank maps uniquely to one GIN rail rank. With >1 rank per node,
+ * multiple MPI ranks share the same rail rank, so the absent-peer mechanism
+ * cannot reliably starve a rail slot.
  * When any prerequisite is missing, ncclDevCommCreate fails or GIN is unbound,
  * and the test SKIPS uniformly on every rank (the ASSERT_MPI_* macros are
  * collective, so the skip must be identical across ranks).
@@ -342,7 +347,12 @@ TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
             int r = runOneBarrier(dc, stream, kShortTimeoutCycles);
             if (r == static_cast<int>(ncclTimeout)) ++timeouts;
         }
+        // Sync after kernel: absent rank must not race ahead while present rank
+        // is still timeout-spinning. Sync after destroy: prevent next
+        // createGinDevComm from racing with the previous destroy.
+        MPI_Barrier(MPI_COMM_WORLD);
         (void)ncclDevCommDestroy(comm, &dc);
+        MPI_Barrier(MPI_COMM_WORLD);
     }
     if (!isAbsent) EXPECT_EQ(kRounds, timeouts);
     MPI_Barrier(MPI_COMM_WORLD);
