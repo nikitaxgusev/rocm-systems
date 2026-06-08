@@ -78,6 +78,18 @@ static ncclResult_t getDmaBufFd(void *addr, size_t length, int *fd,
   uint64_t offset;
   ncclResult_t ret = ncclSuccess;
   ALIGN_SIZE(alignedSize, hostPageSize);
+  // hsa_amd_portable_export_dmabuf can only export device memory; calling it on
+  // a host pointer fails with HSA_STATUS_ERROR_INVALID_AGENT. CPU-accessible
+  // buffers (e.g. GDR-fallback host memory) can reach here registered as
+  // NCCL_PTR_CUDA, so verify the allocation is actually device-resident first
+  // and let the caller fall back to non-DMA-BUF registration otherwise.
+  {
+    hipPointerAttribute_t attr;
+    if (hipPointerGetAttributes(&attr, addr) != hipSuccess || attr.type != hipMemoryTypeDevice) {
+      (void)hipGetLastError();
+      return ncclInvalidUsage;
+    }
+  }
   HSACHECKGOTO(hsa_amd_portable_export_dmabuf((const void*)addr, alignedSize, fd, &offset), ret, fail);
   return ret;
 fail:
