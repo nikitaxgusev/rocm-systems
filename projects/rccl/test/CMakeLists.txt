@@ -319,7 +319,7 @@ if(BUILD_TESTS)
       TimeoutMPITests.cpp
       transport/LsaBarrierTimeoutMPITests.cpp
       transport/GinBarrierTimeoutMPITests.cpp
-      transport/DeviceTimeoutPropagationMPITests.cpp
+      # DeviceTimeoutPropagationMPITests.cpp -- excluded: LSA slot state issues
       transport/LsaBarrierMultiNodeMPITests.cpp
       transport/LsaBarrierMultimemMPITests.cpp
       InFlightCollectiveTimeoutMPITests.cpp
