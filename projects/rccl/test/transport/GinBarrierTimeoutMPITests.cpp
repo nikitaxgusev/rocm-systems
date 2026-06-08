@@ -347,11 +347,16 @@ TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
             int r = runOneBarrier(dc, stream, kShortTimeoutCycles);
             if (r == static_cast<int>(ncclTimeout)) ++timeouts;
         }
-        // Sync after kernel: absent rank must not race ahead while present rank
-        // is still timeout-spinning. Sync after destroy: prevent next
-        // createGinDevComm from racing with the previous destroy.
+        // Drain GPU pipeline on all ranks before IB context teardown: the GIN
+        // proxy thread may still be processing the previous barrier signal
+        // when ncclDevCommDestroy arrives, causing it to block indefinitely.
+        (void)hipStreamSynchronize(stream);
+        // Sync after kernel: absent rank must not race ahead to destroy while
+        // present rank is still timeout-spinning or draining the stream.
         MPI_Barrier(MPI_COMM_WORLD);
         (void)ncclDevCommDestroy(comm, &dc);
+        // Sync after destroy: prevent next createGinDevComm from racing with
+        // the previous IB context teardown on the peer.
         MPI_Barrier(MPI_COMM_WORLD);
     }
     if (!isAbsent) EXPECT_EQ(kRounds, timeouts);
