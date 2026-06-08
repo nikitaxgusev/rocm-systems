@@ -75,25 +75,18 @@ static ncclResult_t getDmaBufFd(void *addr, size_t length, int *fd,
 #if HIP_VERSION >= 70000000
   static size_t hostPageSize = ncclOsGetPageSize();
   size_t alignedSize = length;
-  uint64_t offset;
-  ncclResult_t ret = ncclSuccess;
   ALIGN_SIZE(alignedSize, hostPageSize);
-  // hsa_amd_portable_export_dmabuf can only export device memory; calling it on
-  // a host pointer fails with HSA_STATUS_ERROR_INVALID_AGENT. CPU-accessible
-  // buffers (e.g. GDR-fallback host memory) can reach here registered as
-  // NCCL_PTR_CUDA, so verify the allocation is actually device-resident first
-  // and let the caller fall back to non-DMA-BUF registration otherwise.
-  {
-    hipPointerAttribute_t attr;
-    if (hipPointerGetAttributes(&attr, addr) != hipSuccess || attr.type != hipMemoryTypeDevice) {
-      (void)hipGetLastError();
-      return ncclInvalidUsage;
-    }
-  }
-  HSACHECKGOTO(hsa_amd_portable_export_dmabuf((const void*)addr, alignedSize, fd, &offset), ret, fail);
-  return ret;
-fail:
-  return ret;
+  // Use cuMemGetHandleForAddressRange to export the DMA-BUF fd. This handles
+  // VMM (cuMem/hipMemMap) symmetric-memory ranges, which the symmetric window
+  // path always passes here. hsa_amd_portable_export_dmabuf does NOT support
+  // VMM allocations (returns HSA_STATUS_ERROR_INVALID_ALLOCATION), which made
+  // every dmabuf registration fall back to a plain ibv_reg_mr on the VMM VA
+  // and fail with EFAULT on bnxt_re. Bare cuMemGetHandleForAddressRange is
+  // hipified to hipMemGetHandleForAddressRange at build time on HIP (same
+  // pattern as gin_host_proxy.cc / transport/net.cc).
+  CUresult status = cuMemGetHandleForAddressRange((void *)fd, (CUdeviceptr)addr, alignedSize,
+                                                  CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+  if (status == CUDA_SUCCESS) return ncclSuccess;
 #endif
   return ncclInvalidUsage;
 }
