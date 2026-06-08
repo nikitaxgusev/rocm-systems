@@ -157,6 +157,10 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
     }
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
+    // Drain any pending stream ops from prior tests before launching barrier kernel.
+    (void)hipStreamSynchronize(stream);
+    MPI_Barrier(MPI_COMM_WORLD);
+
     // Zero-budget: all ranks immediately get ncclTimeout regardless of peers.
     int deviceResult = runLsaBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
     EXPECT_EQ(static_cast<int>(ncclTimeout), deviceResult);
@@ -229,6 +233,9 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
     ncclResult_t devRc = createGinDevComm(comm, 1, &devComm);
     if (devRc != ncclSuccess) GTEST_SKIP() << "GIN devComm unavailable";
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
+
+    (void)hipStreamSynchronize(stream);
+    MPI_Barrier(MPI_COMM_WORLD);
 
     int deviceResult = runGinBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
     EXPECT_EQ(static_cast<int>(ncclTimeout), deviceResult);

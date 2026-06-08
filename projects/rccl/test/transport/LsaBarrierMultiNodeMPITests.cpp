@@ -15,7 +15,7 @@
  * rotating-peer pattern in syncInternal and verifies timeout fires correctly
  * when any one of the >1 expected peers is absent.
  *
- * Run with: --map-by ppr:1:node, 4 nodes minimum.
+ * Run with: --map-by ppr:4:node, 1 node minimum (intra-node LSA, avoids cross-node proxy hang).
  * Skips cleanly (GTEST_SKIP) when symmetric memory is unavailable.
  *
  * Tests:
@@ -84,10 +84,14 @@ protected:
     bool setUpLsaDevComm(int nBarriers, ncclComm_t* commOut,
                           hipStream_t* streamOut, ncclDevComm* devCommOut) {
         skipReason_.clear();
-        // Require at least 4 ranks across at least 4 nodes (1 per node).
+        // Require at least 4 ranks on at least 1 node (intra-node LSA, avoids
+        // cross-node ncclDevCommCreate proxy hang on clusters where symmetric
+        // memory allocation doesn't work across nodes).
+        // With 4 ranks/node: lsaTeam.nRanks=4, each rank waits for 3 peers —
+        // exercises the rotating peer pattern more thoroughly than 2-rank tests.
         if (!validateTestPrerequisites(4, kNoProcessLimit, kNoPowerOfTwoRequired,
-                                        4, kNoNodeLimit)) {
-            skipReason_ = "Test requires at least 4 MPI ranks on 4 separate nodes";
+                                        1, kNoNodeLimit)) {
+            skipReason_ = "Test requires at least 4 MPI ranks";
             return false;
         }
         if (createTestCommunicator() != ncclSuccess) {
