@@ -153,9 +153,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_AsyncErrorObservableDuringColl
         if (observed == ncclTimeout) break;
         std::this_thread::yield();
     }
-    ASSERT_MPI_EQ(ncclTimeout, observed)
-        << "ncclTimeout injected but GetAsyncError returned "
-        << ncclGetErrorString(observed);
+    ASSERT_MPI_EQ(ncclTimeout, observed);
     ASSERT_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0);
 
     // Wait for the AllReduce to complete on GPU regardless of async error.
@@ -238,8 +236,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_TimeoutDoesNotCorruptCollectiv
     // Error is still set — verify then clear.
     ncclResult_t state = ncclSuccess;
     ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &state));
-    ASSERT_MPI_EQ(ncclTimeout, state)
-        << "Expected ncclTimeout to still be set after collective completion";
+    ASSERT_MPI_EQ(ncclTimeout, state);
 
     ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
     MPI_Barrier(MPI_COMM_WORLD);
@@ -296,8 +293,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_ClearableBeforeCompletion)
     // Comm must be clean — clearing before completion must stick.
     ncclResult_t state = ncclTimeout;
     ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &state));
-    ASSERT_MPI_EQ(ncclSuccess, state)
-        << "Clearing ncclTimeout before op completion should leave comm clean";
+    ASSERT_MPI_EQ(ncclSuccess, state);
 
     // AllReduce result correctness.
     const float expected = 1.0f * static_cast<float>(worldSize);

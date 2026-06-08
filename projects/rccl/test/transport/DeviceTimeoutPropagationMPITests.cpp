@@ -225,8 +225,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
     if (!isAbsent) {
         ncclResult_t observed = ncclSuccess;
         ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &observed));
-        ASSERT_MPI_EQ(ncclTimeout, observed)
-            << "Expected ncclTimeout from GetAsyncError after device barrier timeout";
+        ASSERT_MPI_EQ(ncclTimeout, observed);
 
         // String must be "timeout"
         ASSERT_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0)
@@ -247,8 +246,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
     // --- Comm reports healthy ---
     ncclResult_t after = ncclTimeout;
     ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
-    ASSERT_MPI_EQ(ncclSuccess, after)
-        << "Comm should report ncclSuccess after successful AllReduce";
+    ASSERT_MPI_EQ(ncclSuccess, after);
 }
 
 /**
@@ -303,8 +301,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
         if (!isAbsent) {
             ncclResult_t obs = ncclSuccess;
             ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &obs));
-            ASSERT_MPI_EQ(ncclTimeout, obs)
-                << "Round " << round << ": GetAsyncError should return ncclTimeout";
+            ASSERT_MPI_EQ(ncclTimeout, obs);
         }
 
         // Clear and verify healthy
@@ -316,8 +313,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
 
         ncclResult_t after = ncclTimeout;
         ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
-        ASSERT_MPI_EQ(ncclSuccess, after)
-            << "Comm should be healthy after round " << round;
+        ASSERT_MPI_EQ(ncclSuccess, after);
     }
 }
 
@@ -370,8 +366,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
     if (!isAbsent) {
         ncclResult_t observed = ncclSuccess;
         ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &observed));
-        ASSERT_MPI_EQ(ncclTimeout, observed)
-            << "Expected ncclTimeout from GetAsyncError after GIN barrier timeout";
+        ASSERT_MPI_EQ(ncclTimeout, observed);
         ASSERT_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0);
     }
     MPI_Barrier(MPI_COMM_WORLD);
