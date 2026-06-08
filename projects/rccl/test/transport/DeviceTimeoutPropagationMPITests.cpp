@@ -208,10 +208,6 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
         (void)hipStreamSynchronize(stream);
     }
     MPI_Barrier(MPI_COMM_WORLD);
-    if (isAbsent) {
-        (void)runLsaBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
-        (void)hipStreamSynchronize(stream);
-    }
     MPI_Barrier(MPI_COMM_WORLD);
 
     // --- Propagate through the async-error API (as production code would) ---
@@ -288,10 +284,6 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
             ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclTimeout));
         }
         MPI_Barrier(MPI_COMM_WORLD);
-        if (isAbsent) {
-            (void)runLsaBarrier(dc, stream, 0ULL);
-            (void)hipStreamSynchronize(stream);
-        }
         MPI_Barrier(MPI_COMM_WORLD);
         (void)ncclDevCommDestroy(comm, &dc);
         MPI_Barrier(MPI_COMM_WORLD);
@@ -349,10 +341,6 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
         (void)hipStreamSynchronize(stream);
     }
     MPI_Barrier(MPI_COMM_WORLD);
-    if (isAbsent) {
-        (void)runGinBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
-        (void)hipStreamSynchronize(stream);
-    }
     MPI_Barrier(MPI_COMM_WORLD);
 
     if (!isAbsent && deviceResult == static_cast<int>(ncclTimeout)) {
