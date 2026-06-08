@@ -320,10 +320,7 @@ if(BUILD_TESTS)
       transport/LsaBarrierTimeoutMPITests.cpp
       transport/GinBarrierTimeoutMPITests.cpp
       transport/DeviceTimeoutPropagationMPITests.cpp
-      # transport/LsaBarrierMultiNodeMPITests.cpp
-      # Excluded: ncclDevCommCreate with lsaBarrierCount>0 hangs on multi-node Ruby cluster.
-      # Cross-node symmetric memory bootstrap requires proxy thread coordination
-      # that doesn't complete on this hardware. Test is valid on DGX/NVLink clusters.
+      transport/LsaBarrierMultiNodeMPITests.cpp
       transport/LsaBarrierMultimemMPITests.cpp
       InFlightCollectiveTimeoutMPITests.cpp
     )

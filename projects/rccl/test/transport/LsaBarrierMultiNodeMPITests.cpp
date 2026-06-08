@@ -89,9 +89,9 @@ protected:
         // peers. Using 4 nodes exercises the multi-hop rotating peer pattern
         // (nRanks-1=3 peers) vs 2-rank tests (1 peer). Run with ppr:1:node.
         // Requires NCCL_CUMEM_ENABLE=1 for ncclDevCommCreate.
-        if (!validateTestPrerequisites(4, kNoProcessLimit, kNoPowerOfTwoRequired,
-                                        4, kNoNodeLimit)) {
-            skipReason_ = "Test requires at least 4 MPI ranks on 4 separate nodes (run with ppr:1:node)";
+        if (!validateTestPrerequisites(2, kNoProcessLimit, kNoPowerOfTwoRequired,
+                                        2, kNoNodeLimit)) {
+            skipReason_ = "Test requires at least 2 MPI ranks on 2 separate nodes (run with ppr:1:node)";
             return false;
         }
         if (createTestCommunicator() != ncclSuccess) {
