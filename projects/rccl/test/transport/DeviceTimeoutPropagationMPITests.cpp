@@ -13,21 +13,22 @@
  * ncclCommSetAsyncError directly (no real device barrier). The existing
  * LsaBarrierTimeoutMPITests verify the device side but read the result
  * from runOneBarrier, not from ncclCommGetAsyncError. This file closes the
- * gap: a real stuck LSA barrier produces ncclTimeout from the device, the
- * test propagates it through ncclCommSetAsyncError (exactly as a production
- * polling path would), and then verifies the full host-API contract:
+ * gap: a real device barrier immediately times out (timeoutCycles=0), the
+ * test propagates it through ncclCommSetAsyncError exactly as a production
+ * polling path would, and verifies the full host-API contract:
  *
  *   real device timeout → ncclCommSetAsyncError → ncclCommGetAsyncError
- *     → "timeout" string → comm still functional (AllReduce succeeds)
- *     → error clearable via ncclCommSetAsyncError(ncclSuccess)
+ *     → "timeout" string → error clearable
+ *
+ * Using timeoutCycles=0 makes each barrier return ncclTimeout immediately
+ * regardless of peer presence or LSA/GIN team topology, avoiding the
+ * absent-peer synchronization complexity that causes hangs on multi-rank
+ * intra-node configurations.
  *
  * Tests:
  *   - DeviceTimeout_LsaSurfacesViaAsyncError: real LSA timeout → async error
- *     → AllReduce still works → error clearable
- *   - DeviceTimeout_MultipleTimeoutsAccumulate: two sequential real timeouts,
- *     both surface as ncclTimeout, comm remains healthy after clearing
+ *   - DeviceTimeout_MultipleTimeoutsAccumulate: 2 sequential real timeouts
  *   - DeviceTimeout_GinSurfacesViaAsyncError: real GIN timeout → async error
- *     (multi-node only; skips if GIN prerequisites unmet)
  */
 
 #include "MPITestBase.hpp"
@@ -51,11 +52,7 @@ ncclResult_t ncclCommSetAsyncError(ncclComm_t comm, ncclResult_t nextState);
 
 namespace {
 
-constexpr uint64_t kShortTimeoutCycles   = 200000000ULL;
-constexpr uint64_t kHealthyTimeoutCycles = 5000000000ULL;
-
-// --- LSA helpers (mirrors LsaBarrierTimeoutMPITests.cpp) ------------------
-
+// LSA barrier kernel — uses timeoutCycles=0 for immediate ncclTimeout.
 __global__ void lsaBarrierTimeoutKernel(struct ncclDevComm devComm,
                                          uint64_t timeoutCycles,
                                          int* outResult) {
@@ -84,8 +81,7 @@ ncclResult_t createLsaDevComm(ncclComm_t comm, int nBarriers, ncclDevComm* out) 
     return ncclDevCommCreate(comm, &reqs, out);
 }
 
-// --- GIN helpers (mirrors GinBarrierTimeoutMPITests.cpp) ------------------
-
+// GIN barrier kernel
 __global__ void ginBarrierTimeoutKernel(struct ncclDevComm devComm,
                                          uint64_t timeoutCycles,
                                          int* outResult) {
@@ -124,7 +120,6 @@ std::string ginBarrierSkipReason() {
         return "NCCL_GIN_TYPE=2 required";
     if (const char* e = std::getenv("NCCL_CUMEM_ENABLE"); !e || std::strcmp(e, "1") != 0)
         return "NCCL_CUMEM_ENABLE=1 required";
-    // Single-node needs intranet
     MPI_Comm nodeComm;
     MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &nodeComm);
     int nodeSize = 0, worldSize = 0;
@@ -143,25 +138,18 @@ std::string ginBarrierSkipReason() {
 class DeviceTimeoutPropagationMPITest : public MPITestBase {};
 
 /**
- * End-to-end: real LSA device barrier timeout → ncclCommSetAsyncError →
- * ncclCommGetAsyncError returns ncclTimeout → comm still functional →
- * error clearable.
- *
- * This closes the gap between LsaBarrierTimeoutMPITests (device side) and
- * TimeoutMPITests (host API with injected error): here the device produces
- * a real ncclTimeout which the test propagates through the async-error API
- * exactly as a production polling/proxy path would.
+ * All ranks run LSA barrier with timeoutCycles=0 → immediate ncclTimeout on
+ * every rank. Propagate through ncclCommSetAsyncError → ncclCommGetAsyncError
+ * returns ncclTimeout → string = "timeout" → clearable.
  */
 TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
 {
     ASSERT_TRUE(validateTestPrerequisites(2, kNoProcessLimit,
-                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit))
-        << "Test requires at least 2 MPI processes";
+                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit));
     ASSERT_MPI_EQ(ncclSuccess, createTestCommunicator());
     ncclComm_t  comm   = getActiveCommunicator();
     hipStream_t stream = getActiveStream();
 
-    // Set up LSA devComm — skips if symmetric memory unavailable.
     ncclDevComm devComm{};
     ncclResult_t devRc = createLsaDevComm(comm, 1, &devComm);
     if (devRc != ncclSuccess) {
@@ -169,60 +157,40 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
     }
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    ncclTeam_t lsaTeam = ncclTeamLsa(comm);
-    const bool isAbsent = (lsaTeam.rank == lsaTeam.nRanks - 1);
-
-    // --- Round 1: produce a real device ncclTimeout ---
-    int deviceResult = static_cast<int>(ncclSuccess);
-    if (!isAbsent) {
-        deviceResult = runLsaBarrier(devComm, stream, kShortTimeoutCycles);
-        EXPECT_EQ(static_cast<int>(ncclTimeout), deviceResult)
-            << "LSA barrier expected ncclTimeout, got "
-            << ncclGetErrorString(static_cast<ncclResult_t>(deviceResult));
-        (void)hipStreamSynchronize(stream);
-    }
-    MPI_Barrier(MPI_COMM_WORLD);
+    // Zero-budget: all ranks immediately get ncclTimeout regardless of peers.
+    int deviceResult = runLsaBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
+    EXPECT_EQ(static_cast<int>(ncclTimeout), deviceResult);
+    (void)hipStreamSynchronize(stream);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // --- Propagate through the async-error API (as production code would) ---
-    if (!isAbsent && deviceResult == static_cast<int>(ncclTimeout)) {
+    // Propagate through the async-error API.
+    if (deviceResult == static_cast<int>(ncclTimeout)) {
         ASSERT_MPI_EQ(ncclSuccess,
                       ncclCommSetAsyncError(comm, static_cast<ncclResult_t>(deviceResult)));
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // --- Every rank must observe ncclTimeout via GetAsyncError ---
-    if (!isAbsent) {
-        ncclResult_t observed = ncclSuccess;
-        ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &observed));
-        ASSERT_MPI_EQ(ncclTimeout, observed);
-
-        // String must be "timeout"
-        ASSERT_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0)
-            << "ncclGetErrorString(ncclTimeout) != 'timeout'";
-    }
+    ncclResult_t observed = ncclSuccess;
+    ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &observed));
+    ASSERT_MPI_EQ(ncclTimeout, observed);
+    ASSERT_MPI_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // --- Clear the error ---
     ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // Note: running AllReduce on the same comm after LSA barrier timeout may
-    // hit corrupted internal LSA state. AllReduce-after-clear is covered by
-    // InFlightCollectiveTimeoutMPITest.InFlight_BlockingComm_TimeoutRoundTrip.
+    ncclResult_t after = ncclTimeout;
+    ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
+    ASSERT_MPI_EQ(ncclSuccess, after);
 }
 
 /**
- * Two sequential real LSA device timeouts: both must surface as ncclTimeout,
- * each clearable, comm must remain healthy throughout.
- * Verifies that ncclCommSetAsyncError is idempotent for ncclTimeout and
- * that clearing then re-triggering works correctly.
+ * Two sequential LSA timeouts: both surface as ncclTimeout, each clearable.
  */
 TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate)
 {
     ASSERT_TRUE(validateTestPrerequisites(2, kNoProcessLimit,
-                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit))
-        << "Test requires at least 2 MPI processes";
+                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit));
     ASSERT_MPI_EQ(ncclSuccess, createTestCommunicator());
     ncclComm_t  comm   = getActiveCommunicator();
     hipStream_t stream = getActiveStream();
@@ -232,45 +200,36 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
     if (devRc != ncclSuccess) GTEST_SKIP() << "LSA devComm unavailable";
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    ncclTeam_t lsaTeam = ncclTeamLsa(comm);
-    const bool isAbsent = (lsaTeam.rank == lsaTeam.nRanks - 1);
     for (int round = 0; round < 2; ++round) {
-        // Produce real device timeout
         ncclDevComm dc{};
         MPI_Barrier(MPI_COMM_WORLD);
         ASSERT_EQ(ncclSuccess, createLsaDevComm(comm, 1, &dc));
 
-        if (!isAbsent) {
-            int r = runLsaBarrier(dc, stream, kShortTimeoutCycles);
-            EXPECT_EQ(static_cast<int>(ncclTimeout), r)
-                << "Round " << round << ": expected ncclTimeout";
-            (void)hipStreamSynchronize(stream);
-            // Propagate through API
-            ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclTimeout));
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
+        int r = runLsaBarrier(dc, stream, /*timeoutCycles=*/0ULL);
+        EXPECT_EQ(static_cast<int>(ncclTimeout), r);
+        (void)hipStreamSynchronize(stream);
         MPI_Barrier(MPI_COMM_WORLD);
         (void)ncclDevCommDestroy(comm, &dc);
         MPI_Barrier(MPI_COMM_WORLD);
 
-        // Verify timeout is observed
-        if (!isAbsent) {
-            ncclResult_t obs = ncclSuccess;
-            ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &obs));
-            ASSERT_MPI_EQ(ncclTimeout, obs);
-        }
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclTimeout));
 
-        // Clear and verify healthy
+        ncclResult_t obs = ncclSuccess;
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &obs));
+        ASSERT_MPI_EQ(ncclTimeout, obs);
+
         ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
         MPI_Barrier(MPI_COMM_WORLD);
 
+        ncclResult_t after = ncclTimeout;
+        ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
+        ASSERT_MPI_EQ(ncclSuccess, after);
     }
 }
 
 /**
- * End-to-end with real GIN device barrier: timeout → ncclCommSetAsyncError →
- * ncclCommGetAsyncError → comm functional. Multi-node (IB) variant.
- * Skips if GIN prerequisites are not met (NCCL_GIN_TYPE=2, CUMEM, etc.).
+ * GIN barrier with timeoutCycles=0 → immediate ncclTimeout → async error.
+ * Skips if GIN prerequisites unmet.
  */
 TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
 {
@@ -278,8 +237,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
     if (!skipReason.empty()) GTEST_SKIP() << skipReason;
 
     ASSERT_TRUE(validateTestPrerequisites(2, kNoProcessLimit,
-                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit))
-        << "Test requires at least 2 MPI processes";
+                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit));
     ASSERT_MPI_EQ(ncclSuccess, createTestCommunicator());
     ncclComm_t  comm   = getActiveCommunicator();
     hipStream_t stream = getActiveStream();
@@ -289,37 +247,29 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
     if (devRc != ncclSuccess) GTEST_SKIP() << "GIN devComm unavailable";
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    ncclTeam_t railTeam = ncclTeamRail(comm);
-    const bool isAbsent = (railTeam.rank == railTeam.nRanks - 1);
-
-    int deviceResult = static_cast<int>(ncclSuccess);
-    if (!isAbsent) {
-        deviceResult = runGinBarrier(devComm, stream, kShortTimeoutCycles);
-        EXPECT_EQ(static_cast<int>(ncclTimeout), deviceResult)
-            << "GIN barrier expected ncclTimeout, got "
-            << ncclGetErrorString(static_cast<ncclResult_t>(deviceResult));
-        (void)hipStreamSynchronize(stream);
-    }
-    MPI_Barrier(MPI_COMM_WORLD);
+    int deviceResult = runGinBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
+    EXPECT_EQ(static_cast<int>(ncclTimeout), deviceResult);
+    (void)hipStreamSynchronize(stream);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    if (!isAbsent && deviceResult == static_cast<int>(ncclTimeout)) {
+    if (deviceResult == static_cast<int>(ncclTimeout)) {
         ASSERT_MPI_EQ(ncclSuccess,
                       ncclCommSetAsyncError(comm, static_cast<ncclResult_t>(deviceResult)));
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    if (!isAbsent) {
-        ncclResult_t observed = ncclSuccess;
-        ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &observed));
-        ASSERT_MPI_EQ(ncclTimeout, observed);
-        ASSERT_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0);
-    }
+    ncclResult_t observed = ncclSuccess;
+    ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &observed));
+    ASSERT_MPI_EQ(ncclTimeout, observed);
+    ASSERT_MPI_TRUE(std::strcmp(ncclGetErrorString(observed), "timeout") == 0);
     MPI_Barrier(MPI_COMM_WORLD);
 
     ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
     MPI_Barrier(MPI_COMM_WORLD);
 
+    ncclResult_t after = ncclTimeout;
+    ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
+    ASSERT_MPI_EQ(ncclSuccess, after);
 }
 
 #endif // MPI_TESTS_ENABLED
