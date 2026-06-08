@@ -312,13 +312,13 @@ TEST_F(GinBarrierTimeoutMPITest, RecoversAfterTimeout)
     if (!isAbsent) {
         int r1 = runOneBarrier(devComm, stream, kShortTimeoutCycles);
         EXPECT_EQ(static_cast<int>(ncclTimeout), r1);
-    } else {
-        // Advance absent rank's IB counter to stay in sync with present ranks.
-        (void)runOneBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
+        (void)hipStreamSynchronize(stream);
     }
-    (void)hipStreamSynchronize(stream);
+    // Absent rank skips round 1 entirely (does not send any signal).
+    // Both ranks sync here before round 2.
     MPI_Barrier(MPI_COMM_WORLD);
 
+    // Round 2: fresh devComm — all ranks participate, barrier should succeed.
     ncclDevComm devComm2{};
     ASSERT_MPI_EQ(ncclSuccess, createGinDevComm(comm, 1, &devComm2));
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm2));
@@ -330,8 +330,8 @@ TEST_F(GinBarrierTimeoutMPITest, RecoversAfterTimeout)
 
 // Stress: repeated stuck barriers each return ncclTimeout with no hang.
 // Works for any ppr:N:node configuration — uses rail-team rank, not MPI rank,
-// to identify the absent peer; absent rank calls runOneBarrier(0) each round
-// to advance its IB counter and stay in sync with present ranks.
+// to identify the absent peer. The absent rank skips runOneBarrier entirely;
+// each round uses a fresh devComm slot so there is no IB counter carry-over.
 //
 // Protocol per round (mirroring RecoversAfterTimeout which is known-good):
 //   1. MPI_Barrier  -- all ranks enter the round together
@@ -362,13 +362,12 @@ TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
         if (!isAbsent) {
             int r = runOneBarrier(dc, stream, kShortTimeoutCycles);
             if (r == static_cast<int>(ncclTimeout)) ++timeouts;
-        } else {
-            // Zero-budget call: advances absent rank's IB counter by 1,
-            // matching the increment the present rank waited for.
-            (void)runOneBarrier(dc, stream, /*timeoutCycles=*/0ULL);
+            (void)hipStreamSynchronize(stream);   // drain GPU before destroy
         }
-        (void)hipStreamSynchronize(stream);   // drain GPU
-        MPI_Barrier(MPI_COMM_WORLD);          // all kernels retired
+        // Absent rank skips runOneBarrier entirely — it must not signal the
+        // present rank (which would cause the barrier to succeed, not timeout).
+        // Each round uses a fresh devComm slot so no counter carry-over.
+        MPI_Barrier(MPI_COMM_WORLD);          // present rank: kernel retired
         (void)ncclDevCommDestroy(comm, &dc);
         MPI_Barrier(MPI_COMM_WORLD);          // teardown complete
     }
