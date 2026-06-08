@@ -321,6 +321,8 @@ if(BUILD_TESTS)
       transport/GinBarrierTimeoutMPITests.cpp
       transport/DeviceTimeoutPropagationMPITests.cpp
       transport/LsaBarrierMultiNodeMPITests.cpp
+      transport/LsaBarrierMultimemMPITests.cpp
+      InFlightCollectiveTimeoutMPITests.cpp
     )
 
     add_executable(rccl-UnitTestsMPI ${MPI_TEST_SOURCE_FILES})
