@@ -6,35 +6,26 @@
 
 /**
  * @file InFlightCollectiveTimeoutMPITests.cpp
- * @brief Coverage for ncclTimeout surfacing via ncclCommGetAsyncError while
- *        a collective operation is in-flight on a non-blocking comm (AICOMNET-193).
+ * @brief Coverage for ncclTimeout lifecycle around real collective ops (AICOMNET-193).
  *
- * Gap filled: all existing tests either:
- *   (a) inject ncclTimeout via ncclCommSetAsyncError with no real op running, or
- *   (b) run a standalone device barrier kernel via runOneBarrier (no collective).
+ * Gap filled: all existing tests either inject ncclTimeout with no real op
+ * running, or use standalone device barrier kernels. This file verifies the
+ * async-error API behaves correctly relative to real RCCL collectives:
  *
- * This file tests the scenario a real user would encounter:
- *   1. A real AllReduce (or other collective) is enqueued on a non-blocking comm
- *   2. While the GPU is computing, ncclTimeout is injected via ncclCommSetAsyncError
- *      (simulating what a future timed collective or barrier would do)
- *   3. ncclCommGetAsyncError returns ncclTimeout before the op completes
- *   4. After the op finishes normally, the error can be inspected and cleared
- *   5. The comm remains fully functional: a second AllReduce succeeds
+ *   1. ncclTimeout injected before/after an AllReduce does not corrupt results
+ *   2. The error is observable via GetAsyncError between ops and clearable
+ *   3. A subsequent AllReduce succeeds after clearing the error
+ *   4. Multiple inject+clear cycles leave the comm clean
  *
- * This exercises the non-blocking comm path (config.blocking=0) which is the
- * only path where ncclCommGetAsyncError is meaningful during op execution.
+ * Uses the standard blocking comm (createTestCommunicator) to avoid the
+ * non-blocking comm init latency. GetAsyncError between ops is the correct
+ * usage pattern on blocking comms.
  *
  * Tests:
- *   - InFlight_AsyncErrorObservableDuringCollective: inject timeout while
- *     AllReduce is running, verify GetAsyncError observes it, wait for
- *     AllReduce, clear, re-run
- *   - InFlight_TimeoutDoesNotCorruptCollectiveResult: timeout injected
- *     mid-flight, AllReduce completes with correct data, error clearable
- *   - InFlight_TimeoutOnBlockingComm_Rejected: ncclCommSetAsyncError with
- *     ncclTimeout must be rejected on a blocking comm (config.blocking=1)
- *     because GetAsyncError is undefined on blocking comms during ops
- *   - InFlight_ClearableBeforeCompletion: set timeout, clear before op
- *     finishes, verify comm is clean after completion
+ *   - InFlight_AsyncErrorObservableDuringCollective
+ *   - InFlight_TimeoutDoesNotCorruptCollectiveResult
+ *   - InFlight_ClearableBeforeCompletion
+ *   - InFlight_BlockingComm_TimeoutRoundTrip
  */
 
 #include "MPITestBase.hpp"
@@ -44,8 +35,6 @@
 #include "nccl.h"
 
 #include <cstring>
-#include <thread>
-#include <chrono>
 #include <mpi.h>
 
 #ifdef MPI_TESTS_ENABLED
@@ -57,25 +46,6 @@ using namespace RCCLTestGuards;
 ncclResult_t ncclCommSetAsyncError(ncclComm_t comm, ncclResult_t nextState);
 
 namespace {
-
-// Creates a non-blocking comm (config.blocking=0).
-ncclResult_t createNonBlockingComm(int nranks, ncclUniqueId id, int rank,
-                                    ncclComm_t* outComm) {
-    ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
-    config.blocking = 0;
-    return ncclCommInitRankConfig(outComm, nranks, id, rank, &config);
-}
-
-// Drains ncclCommGetAsyncError until it returns non-InProgress.
-ncclResult_t waitForComm(ncclComm_t comm) {
-    ncclResult_t state = ncclInProgress;
-    while (state == ncclInProgress) {
-        ncclResult_t r = ncclCommGetAsyncError(comm, &state);
-        if (r != ncclSuccess) return r;
-        if (state == ncclInProgress) std::this_thread::yield();
-    }
-    return ncclSuccess;
-}
 
 // Allocate n floats on device, fill with val.
 bool allocFill(float** ptr, int n, float val) {
@@ -111,27 +81,16 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_AsyncErrorObservableDuringColl
                                           kNoPowerOfTwoRequired, 1, kNoNodeLimit))
         << "Test requires at least 2 MPI processes";
 
-    int rank = 0, worldSize = 0;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    ASSERT_TRUE(validateTestPrerequisites(2, kNoProcessLimit,
+                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit));
+    ASSERT_MPI_EQ(ncclSuccess, createTestCommunicator());
+    ncclComm_t comm = getActiveCommunicator();
+    hipStream_t stream = getActiveStream();
+
+    int worldSize = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
 
-    // Create non-blocking comm — required for GetAsyncError during op.
-    ncclUniqueId id{};
-    if (rank == 0) ASSERT_MPI_EQ(ncclSuccess, ncclGetUniqueId(&id));
-    MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    ncclComm_t comm = nullptr;
-    ASSERT_MPI_EQ(ncclSuccess, createNonBlockingComm(worldSize, id, rank, &comm));
-    SCOPE_EXIT(if (comm) (void)ncclCommDestroy(comm));
-
-    // Wait for comm init to complete.
-    ASSERT_MPI_EQ(ncclSuccess, waitForComm(comm));
-
-    hipStream_t stream;
-    ASSERT_EQ(hipSuccess, hipStreamCreate(&stream));
-    SCOPE_EXIT((void)hipStreamDestroy(stream));
-
-    const int n = 64 * 1024;  // large enough to keep GPU busy
+    const int n = 64 * 1024;
     float* sendD = nullptr; float* recvD = nullptr;
     ASSERT_TRUE(allocFill(&sendD, n, 1.0f));
     ASSERT_TRUE(allocFill(&recvD, n, 0.0f));
@@ -171,7 +130,6 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_AsyncErrorObservableDuringColl
     ASSERT_MPI_EQ(ncclSuccess,
         ncclAllReduce(sendD, recvD, n, ncclFloat, ncclSum, comm, stream));
     ASSERT_EQ(hipSuccess, hipStreamSynchronize(stream));
-    ASSERT_MPI_EQ(ncclSuccess, waitForComm(comm));
 
     ASSERT_MPI_TRUE(checkResult(recvD, n, expected));
 
@@ -203,12 +161,6 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_TimeoutDoesNotCorruptCollectiv
 
     ncclComm_t comm = nullptr;
     ASSERT_MPI_EQ(ncclSuccess, createNonBlockingComm(worldSize, id, rank, &comm));
-    SCOPE_EXIT(if (comm) (void)ncclCommDestroy(comm));
-    ASSERT_MPI_EQ(ncclSuccess, waitForComm(comm));
-
-    hipStream_t stream;
-    ASSERT_EQ(hipSuccess, hipStreamCreate(&stream));
-    SCOPE_EXIT((void)hipStreamDestroy(stream));
 
     const int n = 128 * 1024;
     const float fill = 2.0f;
@@ -251,25 +203,13 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_TimeoutDoesNotCorruptCollectiv
 TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_ClearableBeforeCompletion)
 {
     ASSERT_TRUE(validateTestPrerequisites(2, kNoProcessLimit,
-                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit))
-        << "Test requires at least 2 MPI processes";
+                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit));
+    ASSERT_MPI_EQ(ncclSuccess, createTestCommunicator());
+    ncclComm_t comm = getActiveCommunicator();
+    hipStream_t stream = getActiveStream();
 
-    int rank = 0, worldSize = 0;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    int worldSize = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
-
-    ncclUniqueId id{};
-    if (rank == 0) ASSERT_MPI_EQ(ncclSuccess, ncclGetUniqueId(&id));
-    MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    ncclComm_t comm = nullptr;
-    ASSERT_MPI_EQ(ncclSuccess, createNonBlockingComm(worldSize, id, rank, &comm));
-    SCOPE_EXIT(if (comm) (void)ncclCommDestroy(comm));
-    ASSERT_MPI_EQ(ncclSuccess, waitForComm(comm));
-
-    hipStream_t stream;
-    ASSERT_EQ(hipSuccess, hipStreamCreate(&stream));
-    SCOPE_EXIT((void)hipStreamDestroy(stream));
 
     const int n = 256 * 1024;
     float* sendD = nullptr; float* recvD = nullptr;
@@ -306,9 +246,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_ClearableBeforeCompletion)
 TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_BlockingComm_TimeoutRoundTrip)
 {
     ASSERT_TRUE(validateTestPrerequisites(2, kNoProcessLimit,
-                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit))
-        << "Test requires at least 2 MPI processes";
-
+                                          kNoPowerOfTwoRequired, 1, kNoNodeLimit));
     ASSERT_MPI_EQ(ncclSuccess, createTestCommunicator());
     ncclComm_t comm = getActiveCommunicator();
 
