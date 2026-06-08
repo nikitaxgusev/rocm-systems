@@ -245,6 +245,14 @@ TEST_F(GinBarrierTimeoutMPITest, AbsentPeerProducesTimeout)
         EXPECT_EQ(static_cast<int>(ncclTimeout), hResult)
             << "Rail rank " << railTeam.rank << " expected ncclTimeout from a stuck GIN barrier, got "
             << ncclGetErrorString(static_cast<ncclResult_t>(hResult));
+        (void)hipStreamSynchronize(stream);
+    }
+    // Present rank is done (timed out). Now the absent rank catches up its IB counter
+    // by signaling the present rank's slot, keeping counters in sync for future tests.
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (isAbsent) {
+        (void)runOneBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
+        (void)hipStreamSynchronize(stream);
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
@@ -268,6 +276,12 @@ TEST_F(GinBarrierTimeoutMPITest, ZeroBudgetAbsentPeerTimesOut)
         EXPECT_EQ(static_cast<int>(ncclTimeout), hResult)
             << "Rail rank " << railTeam.rank << " expected immediate ncclTimeout with zero budget, got "
             << ncclGetErrorString(static_cast<ncclResult_t>(hResult));
+        (void)hipStreamSynchronize(stream);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (isAbsent) {
+        (void)runOneBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
+        (void)hipStreamSynchronize(stream);
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
@@ -314,8 +328,13 @@ TEST_F(GinBarrierTimeoutMPITest, RecoversAfterTimeout)
         EXPECT_EQ(static_cast<int>(ncclTimeout), r1);
         (void)hipStreamSynchronize(stream);
     }
-    // Absent rank skips round 1 entirely (does not send any signal).
-    // Both ranks sync here before round 2.
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (isAbsent) {
+        // Catch up IB counter after present rank's timeout so slot 0 is
+        // clean for the next createGinDevComm in round 2.
+        (void)runOneBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
+        (void)hipStreamSynchronize(stream);
+    }
     MPI_Barrier(MPI_COMM_WORLD);
 
     // Round 2: fresh devComm — all ranks participate, barrier should succeed.
@@ -362,14 +381,17 @@ TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
         if (!isAbsent) {
             int r = runOneBarrier(dc, stream, kShortTimeoutCycles);
             if (r == static_cast<int>(ncclTimeout)) ++timeouts;
-            (void)hipStreamSynchronize(stream);   // drain GPU before destroy
+            (void)hipStreamSynchronize(stream);
         }
-        // Absent rank skips runOneBarrier entirely — it must not signal the
-        // present rank (which would cause the barrier to succeed, not timeout).
-        // Each round uses a fresh devComm slot so no counter carry-over.
-        MPI_Barrier(MPI_COMM_WORLD);          // present rank: kernel retired
+        MPI_Barrier(MPI_COMM_WORLD);  // present rank: kernel retired
+        if (isAbsent) {
+            // Catch up IB counter after present rank's timeout.
+            (void)runOneBarrier(dc, stream, /*timeoutCycles=*/0ULL);
+            (void)hipStreamSynchronize(stream);
+        }
+        MPI_Barrier(MPI_COMM_WORLD);  // all done, safe to destroy
         (void)ncclDevCommDestroy(comm, &dc);
-        MPI_Barrier(MPI_COMM_WORLD);          // teardown complete
+        MPI_Barrier(MPI_COMM_WORLD);  // teardown complete
     }
     if (!isAbsent) EXPECT_EQ(kRounds, timeouts);
     MPI_Barrier(MPI_COMM_WORLD);
