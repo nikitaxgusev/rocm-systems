@@ -326,12 +326,18 @@ TEST_F(GinBarrierTimeoutMPITest, RecoversAfterTimeout)
 }
 
 // Stress: repeated stuck barriers each return ncclTimeout with no hang.
-// The absent rank also calls runOneBarrier with zero budget in each round.
-// This is required for correctness: after a timeout the absent rank's IB
-// signal counter is behind by 1 (it never sent its signal). Calling
-// runOneBarrier(dc, 0) on the absent rank advances its own counter via the
-// signal + shadow-ptr increment path, so both ranks exit each round with
-// matching IB counter state and the next createGinDevComm starts clean.
+//
+// Protocol per round (mirroring RecoversAfterTimeout which is known-good):
+//   1. MPI_Barrier  -- all ranks enter the round together
+//   2. createGinDevComm -- collective IB context setup
+//   3. present rank: runOneBarrier(kShort) -> ncclTimeout
+//      absent rank:  runOneBarrier(0)      -> ncclTimeout immediately
+//      Both ranks call runOneBarrier so both execute the signal + shadow-ptr
+//      increment, keeping IB counters in sync across rounds.
+//   4. hipStreamSynchronize -- drain GPU pipeline on all ranks
+//   5. MPI_Barrier  -- confirm all kernels retired before IB teardown
+//   6. ncclDevCommDestroy -- safe: no in-flight GIN proxy ops remain
+//   7. MPI_Barrier  -- confirm teardown complete before next createGinDevComm
 TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
 {
     ncclComm_t comm{}; hipStream_t stream{}; ncclDevComm devComm{};
@@ -346,23 +352,21 @@ TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
     constexpr int kRounds = 4;
     int timeouts = 0;
     for (int i = 0; i < kRounds; ++i) {
+        MPI_Barrier(MPI_COMM_WORLD);  // gate round entry
         ncclDevComm dc{};
         if (createGinDevComm(comm, 1, &dc) != ncclSuccess) break;
         if (!isAbsent) {
-            // Present ranks run the barrier and expect a timeout (absent peer).
             int r = runOneBarrier(dc, stream, kShortTimeoutCycles);
             if (r == static_cast<int>(ncclTimeout)) ++timeouts;
         } else {
-            // Absent rank: call with zero budget so it immediately times out
-            // and advances its IB counter. This cleans up the counter mismatch
-            // that would otherwise cause the next round to hang.
+            // Zero-budget call: advances absent rank's IB counter by 1,
+            // matching the increment the present rank waited for.
             (void)runOneBarrier(dc, stream, /*timeoutCycles=*/0ULL);
         }
-        // Drain GPU pipeline before IB context teardown.
-        (void)hipStreamSynchronize(stream);
-        MPI_Barrier(MPI_COMM_WORLD);
+        (void)hipStreamSynchronize(stream);   // drain GPU
+        MPI_Barrier(MPI_COMM_WORLD);          // all kernels retired
         (void)ncclDevCommDestroy(comm, &dc);
-        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD);          // teardown complete
     }
     if (!isAbsent) EXPECT_EQ(kRounds, timeouts);
     MPI_Barrier(MPI_COMM_WORLD);
