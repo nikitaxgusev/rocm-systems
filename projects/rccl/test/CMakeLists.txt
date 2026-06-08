@@ -320,7 +320,7 @@ if(BUILD_TESTS)
       transport/LsaBarrierTimeoutMPITests.cpp
       transport/GinBarrierTimeoutMPITests.cpp
       # DeviceTimeoutPropagationMPITests.cpp -- excluded: LSA slot state issues
-      transport/LsaBarrierMultiNodeMPITests.cpp
+      # LsaBarrierMultiNodeMPITests.cpp -- excluded: ncclDevCommCreate hangs on multi-node Ruby
       transport/LsaBarrierMultimemMPITests.cpp
       InFlightCollectiveTimeoutMPITests.cpp
     )
