@@ -8,12 +8,12 @@
  * @file TimeoutTests.cpp
  * @brief Unit coverage for the ncclTimeout result code (AICOMNET-193).
  *
- * RCCL has no GIN/LSA barrier producer that raises ncclTimeout yet, so these
- * tests validate the full result-code contract and the async-error pipeline
- * that the new code participates in:
+ * The NCCL v2.30.4 sync brings ncclTimeout (=8) plus device-side producers in
+ * the LSA and GIN barriers. These host-side unit tests pin the result-code
+ * contract that the device producers (and any other caller) rely on:
  *   - enum identity / ordering  (nccl.h.in)
  *   - ncclGetErrorString()      (init.cc)
- *   - ncclCommSetAsyncError()   range guard accepts ncclTimeout, rejects 9
+ *   - ncclCommSetAsyncError()   range guard accepts ncclTimeout, rejects 9/NULL
  *   - ncclCommGetAsyncError()   round-trips the stored ncclTimeout back out
  */
 
@@ -40,7 +40,8 @@ static ncclComm_t MakeMagicComm()
 static void FreeComm(ncclComm_t comm) { delete comm; }
 
 // ncclTimeout must sit at 8, just after ncclInProgress, and the result-count
-// sentinel must move to 9 so the new code is inside the valid range.
+// sentinel must be 9 so the new code is inside the valid range. This matches
+// the upstream NCCL enum value exactly.
 TEST(TimeoutTests, EnumValueAndOrdering)
 {
     EXPECT_EQ(static_cast<int>(ncclInProgress), 7);
@@ -71,8 +72,8 @@ TEST(TimeoutTests, ErrorStringRegression)
 }
 
 // The range guard in ncclCommSetAsyncError (nextState >= ncclNumResults) must
-// now ACCEPT ncclTimeout=8. Before the change ncclNumResults was 8, so this
-// exact call would have been rejected -- this is the core regression guard.
+// accept ncclTimeout=8. This is the path a device-side timeout producer takes
+// to surface ncclTimeout through the async-error mechanism.
 TEST(TimeoutTests, SetAsyncErrorAcceptsTimeout)
 {
     ncclComm_t comm = MakeMagicComm();
@@ -84,7 +85,7 @@ TEST(TimeoutTests, SetAsyncErrorAcceptsTimeout)
 }
 
 // ncclNumResults (9) and anything above, plus negatives, stay rejected so the
-// boundary moved exactly one slot rather than opening up.
+// valid range is exactly [0, 9).
 TEST(TimeoutTests, SetAsyncErrorRejectsOutOfRange)
 {
     ncclComm_t comm = MakeMagicComm();
@@ -99,8 +100,7 @@ TEST(TimeoutTests, SetAsyncErrorRejectsOutOfRange)
 }
 
 // The same guard rejects a NULL comm. ncclTimeout is in range, so this proves
-// the comm==NULL arm fires independently of the range check -- otherwise a
-// valid-code/NULL-comm call would dereference null on the store below.
+// the comm==NULL arm fires independently of the range check.
 TEST(TimeoutTests, SetAsyncErrorRejectsNullComm)
 {
     EXPECT_EQ(ncclCommSetAsyncError(nullptr, ncclTimeout), ncclInvalidArgument);
