@@ -231,16 +231,19 @@ TEST_F(GinBarrierTimeoutMPITest, AbsentPeerProducesTimeout)
     if (!setUpGinDevComm(1, &comm, &stream, &devComm)) GIN_SETUP_OR_BAIL();
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    int rank = -1, nRanks = -1;
-    ncclCommUserRank(comm, &rank);
-    ncclCommCount(comm, &nRanks);
-    const bool isAbsent = (rank == nRanks - 1);
+    // Use rail-team rank to identify the absent rank so the test works for any
+    // number of MPI ranks per node (ppr:1:node, ppr:2:node, etc.).
+    // With >1 rank/node, multiple MPI ranks share the same rail rank; using
+    // MPI world rank nRanks-1 as "absent" would leave other rail-rank-1 peers
+    // still signaling, causing spurious barrier success.
+    ncclTeam_t railTeam = ncclTeamRail(comm);
+    const bool isAbsent = (railTeam.rank == railTeam.nRanks - 1);
 
     int hResult = static_cast<int>(ncclSuccess);
     if (!isAbsent) {
         hResult = runOneBarrier(devComm, stream, kShortTimeoutCycles);
         EXPECT_EQ(static_cast<int>(ncclTimeout), hResult)
-            << "Rank " << rank << " expected ncclTimeout from a stuck GIN barrier, got "
+            << "Rail rank " << railTeam.rank << " expected ncclTimeout from a stuck GIN barrier, got "
             << ncclGetErrorString(static_cast<ncclResult_t>(hResult));
     }
     MPI_Barrier(MPI_COMM_WORLD);
@@ -256,16 +259,14 @@ TEST_F(GinBarrierTimeoutMPITest, ZeroBudgetAbsentPeerTimesOut)
     if (!setUpGinDevComm(1, &comm, &stream, &devComm)) GIN_SETUP_OR_BAIL();
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    int rank = -1, nRanks = -1;
-    ncclCommUserRank(comm, &rank);
-    ncclCommCount(comm, &nRanks);
-    const bool isAbsent = (rank == nRanks - 1);
+    ncclTeam_t railTeam = ncclTeamRail(comm);
+    const bool isAbsent = (railTeam.rank == railTeam.nRanks - 1);
 
     int hResult = static_cast<int>(ncclSuccess);
     if (!isAbsent) {
         hResult = runOneBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
         EXPECT_EQ(static_cast<int>(ncclTimeout), hResult)
-            << "Rank " << rank << " expected immediate ncclTimeout with zero budget, got "
+            << "Rail rank " << railTeam.rank << " expected immediate ncclTimeout with zero budget, got "
             << ncclGetErrorString(static_cast<ncclResult_t>(hResult));
     }
     MPI_Barrier(MPI_COMM_WORLD);
@@ -305,15 +306,17 @@ TEST_F(GinBarrierTimeoutMPITest, RecoversAfterTimeout)
     if (!setUpGinDevComm(1, &comm, &stream, &devComm)) GIN_SETUP_OR_BAIL();
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    int rank = -1, nRanks = -1;
-    ncclCommUserRank(comm, &rank);
-    ncclCommCount(comm, &nRanks);
-    const bool isAbsent = (rank == nRanks - 1);
+    ncclTeam_t railTeam = ncclTeamRail(comm);
+    const bool isAbsent = (railTeam.rank == railTeam.nRanks - 1);
 
     if (!isAbsent) {
         int r1 = runOneBarrier(devComm, stream, kShortTimeoutCycles);
         EXPECT_EQ(static_cast<int>(ncclTimeout), r1);
+    } else {
+        // Advance absent rank's IB counter to stay in sync with present ranks.
+        (void)runOneBarrier(devComm, stream, /*timeoutCycles=*/0ULL);
     }
+    (void)hipStreamSynchronize(stream);
     MPI_Barrier(MPI_COMM_WORLD);
 
     ncclDevComm devComm2{};
@@ -326,6 +329,9 @@ TEST_F(GinBarrierTimeoutMPITest, RecoversAfterTimeout)
 }
 
 // Stress: repeated stuck barriers each return ncclTimeout with no hang.
+// Works for any ppr:N:node configuration — uses rail-team rank, not MPI rank,
+// to identify the absent peer; absent rank calls runOneBarrier(0) each round
+// to advance its IB counter and stay in sync with present ranks.
 //
 // Protocol per round (mirroring RecoversAfterTimeout which is known-good):
 //   1. MPI_Barrier  -- all ranks enter the round together
@@ -344,10 +350,8 @@ TEST_F(GinBarrierTimeoutMPITest, BackToBackTimeouts)
     if (!setUpGinDevComm(1, &comm, &stream, &devComm)) GIN_SETUP_OR_BAIL();
     SCOPE_EXIT((void)ncclDevCommDestroy(comm, &devComm));
 
-    int rank = -1, nRanks = -1;
-    ncclCommUserRank(comm, &rank);
-    ncclCommCount(comm, &nRanks);
-    const bool isAbsent = (rank == nRanks - 1);
+    ncclTeam_t railTeam = ncclTeamRail(comm);
+    const bool isAbsent = (railTeam.rank == railTeam.nRanks - 1);
 
     constexpr int kRounds = 4;
     int timeouts = 0;
