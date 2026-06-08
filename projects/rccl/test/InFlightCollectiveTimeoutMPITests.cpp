@@ -161,8 +161,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_AsyncErrorObservableDuringColl
 
     // AllReduce must have produced correct results despite async error.
     const float expected = 1.0f * static_cast<float>(worldSize);
-    ASSERT_MPI_TRUE(checkResult(recvD, n, expected))
-        << "AllReduce result corrupted when ncclTimeout was set during op";
+    ASSERT_MPI_TRUE(checkResult(recvD, n, expected));
 
     // Clear the error.
     ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
@@ -174,8 +173,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_AsyncErrorObservableDuringColl
     ASSERT_EQ(hipSuccess, hipStreamSynchronize(stream));
     ASSERT_MPI_EQ(ncclSuccess, waitForComm(comm));
 
-    ASSERT_MPI_TRUE(checkResult(recvD, n, expected))
-        << "Second AllReduce failed after clearing ncclTimeout";
+    ASSERT_MPI_TRUE(checkResult(recvD, n, expected));
 
     // Comm is clean.
     ncclResult_t after = ncclTimeout;
@@ -230,8 +228,7 @@ TEST_F(InFlightCollectiveTimeoutMPITest, InFlight_TimeoutDoesNotCorruptCollectiv
 
     // Result must be correct: timeout is advisory, not a cancel.
     const float expected = fill * static_cast<float>(worldSize);
-    ASSERT_MPI_TRUE(checkResult(recvD, n, expected))
-        << "Collective result corrupted by mid-flight ncclTimeout injection";
+    ASSERT_MPI_TRUE(checkResult(recvD, n, expected));
 
     // Error is still set — verify then clear.
     ncclResult_t state = ncclSuccess;

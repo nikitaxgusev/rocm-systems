@@ -240,8 +240,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_LsaSurfacesViaAsyncError)
     // --- Comm must still be fully functional after clearing ---
     int worldSize = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
-    ASSERT_MPI_TRUE(runAllReduce(comm, stream, worldSize))
-        << "AllReduce failed after clearing ncclTimeout async error";
+    ASSERT_MPI_TRUE(runAllReduce(comm, stream, worldSize));
 
     // --- Comm reports healthy ---
     ncclResult_t after = ncclTimeout;
@@ -308,8 +307,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_MultipleTimeoutsAccumulate
         ASSERT_MPI_EQ(ncclSuccess, ncclCommSetAsyncError(comm, ncclSuccess));
         MPI_Barrier(MPI_COMM_WORLD);
 
-        ASSERT_MPI_TRUE(runAllReduce(comm, stream, worldSize))
-            << "AllReduce failed after clearing in round " << round;
+        ASSERT_MPI_TRUE(runAllReduce(comm, stream, worldSize));
 
         ncclResult_t after = ncclTimeout;
         ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
@@ -376,8 +374,7 @@ TEST_F(DeviceTimeoutPropagationMPITest, DeviceTimeout_GinSurfacesViaAsyncError)
 
     int worldSize = 0;
     MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
-    ASSERT_MPI_TRUE(runAllReduce(comm, stream, worldSize))
-        << "AllReduce failed after clearing GIN ncclTimeout async error";
+    ASSERT_MPI_TRUE(runAllReduce(comm, stream, worldSize));
 
     ncclResult_t after = ncclTimeout;
     ASSERT_MPI_EQ(ncclSuccess, ncclCommGetAsyncError(comm, &after));
