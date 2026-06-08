@@ -369,11 +369,11 @@ ncclResult_t ncclRmaProxyRegister(struct ncclComm* comm, void* address, size_t s
     ncclGinWindow_t rmaDevWins[NCCL_GIN_MAX_CONNECTIONS]){
       struct ncclRmaProxyState* rmaProxyState = &comm->rmaState.rmaProxyState;
       for (int n = 0; n < rmaProxyState->ginCommCount; n++) {
-	  ncclNetProperties_t props_tmp = rmaProxyState->props[n];
-	  if (rcclParamRmaProxyUseDMABUF() == 0) {
-            props_tmp.ptrSupport &= ~NCCL_PTR_DMABUF;
-	  }
-	  NCCLCHECK(ncclRmaProxyRegMrSym(rmaProxyState->ncclGin, rmaProxyState->ginComms[n], props_tmp, address, size,
+	  // Pass the NIC's real props (keep NCCL_PTR_DMABUF). Stripping dmabuf here
+	  // forced the symmetric window (a VMM/cuMem allocation) through the plain
+	  // ibv_reg_mr path, which fails with EFAULT on bnxt_re; the dmabuf path via
+	  // cuMemGetHandleForAddressRange handles VMM correctly. Matches develop.
+	  NCCLCHECK(ncclRmaProxyRegMrSym(rmaProxyState->ncclGin, rmaProxyState->ginComms[n], rmaProxyState->props[n], address, size,
                                          NCCL_PTR_CUDA, 0, &rmaHostWins[n], &rmaDevWins[n]));
         if (rmaHostWins[n] == NULL) {
           WARN("rank %d - GIN Symmetric register failed: buff %p, size %ld", comm->rank, address, size);
