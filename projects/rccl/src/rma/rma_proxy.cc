@@ -205,8 +205,14 @@ static ncclResult_t ncclRmaProxyCtxAllocGraph(struct ncclComm* comm, ncclGin_t* 
   // Allocate the CPU-accessible signal for graph capture and then register the memory region with the GIN plugin.
   NCCLCHECK(allocMemCPUAccessible(&rmaProxyCtx->cpuAccessSignals, &rmaProxyCtx->cpuAccessSignalsDev,
                                   comm->nRanks + 1, 0, &rmaProxyCtx->cpuAccessSignalsGdrHandle, comm->memManager));
+  // cpuAccessSignalsDev is CPU-accessible (GDR-pinned or hipHostMalloc) host
+  // memory from allocMemCPUAccessible, NOT a VMM device allocation. Register it
+  // as NCCL_PTR_HOST so it takes the plain host regMrSym path; registering it as
+  // NCCL_PTR_CUDA sends it through the dmabuf/device reg_mr path, which fails
+  // (cuMemGetHandleForAddressRange rejects non-VMM, then ibv_reg_mr EFAULTs on
+  // bnxt_re) and aborts symmetric window registration.
   NCCLCHECK(ncclRmaProxyRegMrSym(ginComm, rmaProxyCtx->ginCollComm, rmaProxyCtx->props, rmaProxyCtx->cpuAccessSignalsDev, signalsBufSize,
-                                 NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO,
+                                 NCCL_PTR_HOST, NCCL_NET_MR_FLAG_FORCE_SO,
                                  &rmaProxyCtx->cpuAccessSignalsMhandle, &rmaProxyCtx->cpuAccessSignalsGinHandle));
   // Allocate the host buffer to track the expected values of the signals
   NCCLCHECK(ncclCalloc(&rmaProxyCtx->cpuAccessSignalsHost, signalsBufSize));
