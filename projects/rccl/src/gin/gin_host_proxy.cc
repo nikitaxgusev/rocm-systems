@@ -286,7 +286,7 @@ static ncclResult_t proxyGinProcessGfd(ncclGin_t *ginComm, void *collComm, struc
     void *signalHandle = (void *)(uint64_t)gfd->qword[ncclGinProxyGfdVASignalHandle].vaSignalHandle.vaSignalHandle;
     signalVal = extractSignalVal(gfd);
     signalOp = mapGfdOpToSignalOp(gfd);
-    NCCLCHECK(ginComm->iputSignal(ctx, hostGpuCtx->contextId, 0, nullptr, 0, 0, nullptr,
+    NCCLCHECK(ginComm->iputSignal(collComm, hostGpuCtx->contextId, 0, nullptr, 0, 0, nullptr,
                                   targetRank, signalOff, signalHandle, signalVal,
                                   signalOp, &state->request));
     return ncclSuccess;
@@ -322,14 +322,14 @@ static ncclResult_t proxyGinProcessGfd(ncclGin_t *ginComm, void *collComm, struc
       signalOp = mapGfdOpToSignalOp(gfd);
       if (signalOp == -1) {
         // First cast from 63 bits to 64 bits and then to void * to avoid warnings
-        NCCLCHECK(ginComm->iput(ctx, hostGpuCtx->contextId, srcOff, srcHandle, size, dstOff, dstHandle,
+        NCCLCHECK(ginComm->iput(collComm, hostGpuCtx->contextId, srcOff, srcHandle, size, dstOff, dstHandle,
                                 targetRank, &state->request));
       } else {
         // Reconstruct the signal value
         signalVal = extractSignalVal(gfd);
         uint64_t signalOff = (gfd->qword[ncclGinProxyGfdCompletion].completion.signalId +
                               hostGpuCtx->contextId * ctx->nSignalsPerContext) * sizeof(uint64_t);
-        NCCLCHECK(ginComm->iputSignal(ctx, hostGpuCtx->contextId, srcOff, srcHandle, size, dstOff, dstHandle,
+        NCCLCHECK(ginComm->iputSignal(collComm, hostGpuCtx->contextId, srcOff, srcHandle, size, dstOff, dstHandle,
                                       targetRank, signalOff, ctx->signalsGinHandle, signalVal,
                                       signalOp, &state->request));
       }

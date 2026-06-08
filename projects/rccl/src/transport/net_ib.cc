@@ -3303,8 +3303,9 @@ ncclResult_t ncclGinIbP2PBarrier(struct ncclGinIbCollComm *cComm) {
 // We don't yet thread connection multiplexing through this transport so we
 // accept the new args and ignore them; behaviour matches the prior
 // nConnections == 1 single-QP setup.
-ncclResult_t ncclGinIbConnect(void* ctx, void* handles[], int nranks, int rank, int nConnections, int queueDepth, void* listenComm, void** collComm) {
-  (void)nConnections; (void)queueDepth;
+// v13 connect: dropped the v12 nConnections/queueDepth parameters (the proxy
+// always used a single connection per peer, so they were ignored anyway).
+ncclResult_t ncclGinIbConnect(void* ctx, void* handles[], int nranks, int rank, void* listenComm, void** collComm) {
   struct ncclIbListenComm *lComm = (struct ncclIbListenComm *)listenComm;
   struct ncclGinIbCollComm *cComm = nullptr;
   int next;
@@ -3532,13 +3533,14 @@ ncclResult_t ncclGinIbProxyCloseColl(void* collComm) {
   return ncclSuccess;
 }
 
-// [RCCL] 2.29.7 added an int connectionId parameter -- we don't yet model
-// per-connection multiplexing here, so just ignore it (matches connectionId==0).
-ncclResult_t ncclGinIbProxyIPut(void *collComm, uint64_t srcOff, void *srcMhandle, size_t size,
-                                uint64_t dstOff, void *dstMhandle, uint32_t rank, int connectionId, void **request)
+// v13: ginCtx is the collComm (createContext returns collComm as ginCtx for the
+// proxy); context selects a device context, which the proxy does not multiplex,
+// so it is ignored (single-context behaviour, matches the prior connectionId==0).
+ncclResult_t ncclGinIbProxyIPut(void *ginCtx, int context, uint64_t srcOff, void *srcMhandle, size_t size,
+                                uint64_t dstOff, void *dstMhandle, uint32_t rank, void **request)
 {
-  (void)connectionId;
-  struct ncclGinIbCollComm* cComm = (struct ncclGinIbCollComm*)collComm;
+  (void)context;
+  struct ncclGinIbCollComm* cComm = (struct ncclGinIbCollComm*)ginCtx;
 
   struct ncclIbGinProxyMrHandle *srcMrHandle = (struct ncclIbGinProxyMrHandle *)srcMhandle;
   struct ncclIbGinProxyMrHandle *dstMrHandle = (struct ncclIbGinProxyMrHandle *)dstMhandle;
@@ -3586,19 +3588,19 @@ ncclResult_t ncclGinIbProxyIPut(void *collComm, uint64_t srcOff, void *srcMhandl
   return ncclSuccess;
 }
 
-// [RCCL] 2.29.7 added an int connectionId parameter -- ignored as above.
-ncclResult_t ncclGinIbProxyIPutSignal(void *collComm, uint64_t srcOff, void *srcMhandle,
+// v13: ginCtx is the collComm; context is ignored (single-context proxy).
+ncclResult_t ncclGinIbProxyIPutSignal(void *ginCtx, int context, uint64_t srcOff, void *srcMhandle,
                                       size_t size, uint64_t dstOff, void *dstMhandle,
                                       uint32_t rank, uint64_t signalOff, void *signalMhandle,
-                                      uint64_t signalValue, uint32_t signalOp, int connectionId, void **request)
+                                      uint64_t signalValue, uint32_t signalOp, void **request)
 {
-  (void)connectionId;
+  (void)context;
   if (signalOp != NCCL_NET_SIGNAL_OP_INC && signalOp != NCCL_NET_SIGNAL_OP_ADD) {
     WARN("ncclGinIbProxyIPutSignal: Unsupported signalOp %u", signalOp);
     return ncclInvalidArgument;
   }
 
-  struct ncclGinIbCollComm* cComm = (struct ncclGinIbCollComm*)collComm;
+  struct ncclGinIbCollComm* cComm = (struct ncclGinIbCollComm*)ginCtx;
 
   struct ncclIbGinProxyMrHandle *srcMrHandle = (struct ncclIbGinProxyMrHandle *)srcMhandle;
   struct ncclIbGinProxyMrHandle *dstMrHandle = (struct ncclIbGinProxyMrHandle *)dstMhandle;
@@ -3717,26 +3719,68 @@ ncclResult_t ncclGinIbProxyTest(void *collComm, void *request, int *done) {
   return ncclSuccess;
 }
 
+// v13 createContext: the proxy keeps no separate device context, so the ginCtx
+// handed back to the caller is just the collComm. context multiplexing is not
+// supported, so reject a request for more than one context.
+ncclResult_t ncclGinIbProxyCreateContext(void* collComm, ncclGinConfig_v13_t* config,
+    void** ginCtx, ncclNetDeviceHandle_v11_t** devHandle) {
+  (void)devHandle;
+  if (config && config->nContexts > 1) {
+    WARN("GIN_IB_PROXY does not support multiple contexts (nContexts=%d)", config->nContexts);
+    return ncclInvalidUsage;
+  }
+  *ginCtx = collComm;
+  return ncclSuccess;
+}
+
+// v13 destroyContext: the proxy keeps no separate device context (ginCtx is the
+// collComm, which is freed by closeColl), so this is a no-op. It must be non-NULL
+// because ncclGinFinalize calls destroyContext unconditionally.
+ncclResult_t ncclGinIbProxyDestroyContext(void* ginCtx) {
+  (void)ginCtx;
+  return ncclSuccess;
+}
+
+// v13 iget: the proxy backend has no one-sided get implementation.
+ncclResult_t ncclGinIbProxyIGet(void* ginCtx, int context, uint64_t remoteOff, void* remoteMhandle,
+    size_t size, uint64_t localOff, void* localMhandle, uint32_t rank, void** request) {
+  (void)ginCtx; (void)context; (void)remoteOff; (void)remoteMhandle; (void)size;
+  (void)localOff; (void)localMhandle; (void)rank; (void)request;
+  WARN("GIN_IB_PROXY does not support iget");
+  return ncclInvalidUsage;
+}
+
+// v13 iflush: ensures visibility after a get. The proxy has no get path, so this
+// is a no-op (matches the v12 adapter's behaviour).
+ncclResult_t ncclGinIbProxyIFlush(void* ginCtx, int context, void* mhandle, uint32_t rank,
+    void** request) {
+  (void)ginCtx; (void)context; (void)mhandle; (void)rank;
+  *request = NULL;
+  return ncclSuccess;
+}
+
 // No support for NCCL_IB_SPLIT_DATA_ON_QPS or NCCL_IB_MERGE_NICS
-ncclGin_v12_t ncclGinIbProxy = {
+ncclGin_t ncclGinIbProxy = {
   "GIN_IB_PROXY",
   ncclGinIbInit,
   ncclIbDevices,
   ncclGinIbProxyGetProperties,
   ncclIbListen,
   ncclGinIbConnect,
-  NULL,
+  ncclGinIbProxyCreateContext,
   ncclGinIbProxyRegMrSym,
   ncclGinIbProxyRegMrSymDmaBuf,
   ncclGinIbProxyDeregMrSym,
-  NULL,
+  ncclGinIbProxyDestroyContext,
   ncclGinIbCloseColl,
   ncclIbCloseListen,
   ncclGinIbProxyIPut,
   ncclGinIbProxyIPutSignal,
+  ncclGinIbProxyIGet,
+  ncclGinIbProxyIFlush,
   ncclGinIbProxyTest,
-  NULL,
-  NULL,
+  NULL,                       // ginProgress (RMA proxy drives progress separately)
+  NULL,                       // queryLastError
   ncclGinIbFinalize
 };
 
@@ -3746,24 +3790,26 @@ ncclGin_v12_t ncclGinIbProxy = {
 // implementation -- this is a strict subset that always works on ROCm
 // HCAs and matches the existing behaviour. Whoever wires up GDAKI in
 // the future can replace this with a real dispatcher.
-ncclGin_v12_t ncclGinIb = {
+ncclGin_t ncclGinIb = {
   "GIN_IB",
   ncclGinIbInit,
   ncclIbDevices,
   ncclGinIbProxyGetProperties,
   ncclIbListen,
   ncclGinIbConnect,
-  NULL,
+  ncclGinIbProxyCreateContext,
   ncclGinIbProxyRegMrSym,
   ncclGinIbProxyRegMrSymDmaBuf,
   ncclGinIbProxyDeregMrSym,
-  NULL,
+  ncclGinIbProxyDestroyContext,
   ncclGinIbCloseColl,
   ncclIbCloseListen,
   ncclGinIbProxyIPut,
   ncclGinIbProxyIPutSignal,
+  ncclGinIbProxyIGet,
+  ncclGinIbProxyIFlush,
   ncclGinIbProxyTest,
-  NULL,
-  NULL,
+  NULL,                       // ginProgress
+  NULL,                       // queryLastError
   ncclGinIbFinalize
 };

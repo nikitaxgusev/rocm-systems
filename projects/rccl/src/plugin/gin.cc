@@ -241,10 +241,11 @@ static void initPluginLibsOnceFunc() {
     pluginCounter++;
   }
 
-  ginPluginLibs[pluginCounter].ncclGin = getNcclGin_v12_internal(&ncclGinIb);
+  // Internal IB GIN plugins are native ncclGin_t (v13), so assign them directly
+  // instead of routing through a v12->v13 adapter.
+  ginPluginLibs[pluginCounter].ncclGin = &ncclGinIb;
   ginPluginLibs[pluginCounter].ncclGinPluginState = ncclGinPluginStateInitReady;
-  ginPluginLibs[pluginCounter].ncclGinVersion = ncclGinVersion[2];
-  ginPluginLibs[pluginCounter].ncclRma = getNcclGin_v12_internal(&ncclGinIbProxy);
+  ginPluginLibs[pluginCounter].ncclRma = &ncclGinIbProxy;
   ginPluginLibs[pluginCounter].ncclRmaPluginState = ncclGinPluginStateInitReady;
   ginPluginLibs[pluginCounter].ncclGinVersion = ncclGinVersion[0];
 
