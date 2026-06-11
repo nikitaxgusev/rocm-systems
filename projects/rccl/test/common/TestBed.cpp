@@ -474,11 +474,15 @@ namespace RcclUnitTesting
     InteractiveWait("Starting DestroyComms");
 
     int const cmd = TestBedChild::CHILD_DESTROY_COMMS;
+
+    // Send DestroyComms command to all active child processes first so they can
+    // work in parallel, then collect acknowledgements in a second pass.
     for (int childId = 0; childId < this->numActiveChildren; ++childId)
     {
-      // Send DestroyComms command to each active child process
       PIPE_WRITE(childId, cmd);
-
+    }
+    for (int childId = 0; childId < this->numActiveChildren; ++childId)
+    {
       // Wait for child acknowledgement
       PIPE_CHECK(childId);
     }
