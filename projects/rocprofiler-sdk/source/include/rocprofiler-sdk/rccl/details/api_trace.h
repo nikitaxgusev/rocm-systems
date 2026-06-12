@@ -47,7 +47,7 @@
 #define RCCL_API_TRACE_VERSION_MAJOR 0
 
 // should be increased every time new members are added to existing dispatch tables
-#define RCCL_API_TRACE_VERSION_PATCH 5
+#define RCCL_API_TRACE_VERSION_PATCH 7
 
 #if !defined(RCCL_EXTERN_C_INIT)
 #    ifdef __cplusplus
@@ -273,8 +273,18 @@ typedef ncclResult_t (*ncclCommMemStats_fn_t)(ncclComm_t        comm,
                                               ncclCommMemStat_t stat,
                                               uint64_t*         value);
 
+typedef ncclResult_t (*ncclCommGetUniqueId_fn_t)(ncclComm_t comm, ncclUniqueId* uniqueId);
+
+typedef ncclResult_t (*ncclCommGrow_fn_t)(ncclComm_t          comm,
+                                          int                 nRanks,
+                                          const ncclUniqueId* uniqueId,
+                                          int                 rank,
+                                          ncclComm_t*         newcomm,
+                                          ncclConfig_t*       config);
+
 typedef struct rcclApiFuncTable
 {
+    // ADD NEW FUNCTIONS AT BOTTOM ONLY
     uint64_t                      size;
     ncclAllGather_fn_t            ncclAllGather_fn;
     ncclAllReduce_fn_t            ncclAllReduce_fn;
@@ -323,6 +333,9 @@ typedef struct rcclApiFuncTable
     ncclCommSuspend_fn_t          ncclCommSuspend_fn;
     ncclCommResume_fn_t           ncclCommResume_fn;
     ncclCommMemStats_fn_t         ncclCommMemStats_fn;
+    ncclCommGetUniqueId_fn_t      ncclCommGetUniqueId_fn;
+    ncclCommGrow_fn_t             ncclCommGrow_fn;
+    // ADD NEW FUNCTIONS HERE ONLY
 } rcclApiFuncTable;
 
 RCCL_EXTERN_C_FINI
