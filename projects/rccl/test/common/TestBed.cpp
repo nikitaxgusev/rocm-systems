@@ -476,31 +476,38 @@ namespace RcclUnitTesting
     int const cmd = TestBedChild::CHILD_DESTROY_COMMS;
 
     // Send DestroyComms command to all active child processes first so they can
-    // work in parallel, then collect acknowledgements in a second pass.
+    // work in parallel, then collect acknowledgements in a second pass. Run the
+    // pipe traffic inside a lambda: the PIPE_WRITE/PIPE_CHECK macros call
+    // gtest's ASSERT_*/FAIL() which return on failure, so a failed write to one
+    // child would otherwise skip Finalize() and orphan the remaining children.
+    // The lambda confines that early return, so Finalize() always runs.
     using Clock = std::chrono::high_resolution_clock;
-    auto const sendStart = Clock::now();
-    for (int childId = 0; childId < this->numActiveChildren; ++childId)
+    [&]()
     {
-      PIPE_WRITE(childId, cmd);
-    }
-    auto const waitStart = Clock::now();
-    for (int childId = 0; childId < this->numActiveChildren; ++childId)
-    {
-      // Wait for child acknowledgement
-      PIPE_CHECK(childId);
-    }
+      auto const sendStart = Clock::now();
+      for (int childId = 0; childId < this->numActiveChildren; ++childId)
+      {
+        PIPE_WRITE(childId, cmd);
+      }
+      auto const waitStart = Clock::now();
+      for (int childId = 0; childId < this->numActiveChildren; ++childId)
+      {
+        // Wait for child acknowledgement
+        PIPE_CHECK(childId);
+      }
 
-    if (ev.verbose)
-    {
-      using std::chrono::duration_cast;
-      using std::chrono::milliseconds;
-      auto const sendMs = duration_cast<milliseconds>(waitStart - sendStart).count();
-      auto const waitMs = duration_cast<milliseconds>(Clock::now() - waitStart).count();
-      TEST_INFO("DestroyComms: %d children, send %ld ms, parallel teardown %ld ms",
-                this->numActiveChildren, (long)sendMs, (long)waitMs);
-    }
+      if (ev.verbose)
+      {
+        using std::chrono::duration_cast;
+        using std::chrono::milliseconds;
+        auto const sendMs = duration_cast<milliseconds>(waitStart - sendStart).count();
+        auto const waitMs = duration_cast<milliseconds>(Clock::now() - waitStart).count();
+        TEST_INFO("DestroyComms: %d children, send %ld ms, parallel teardown %ld ms",
+                  this->numActiveChildren, (long)sendMs, (long)waitMs);
+      }
+    }();
 
-    // Close any open child processes
+    // Close any open child processes (always, even if the teardown above failed)
     Finalize();
 
     InteractiveWait("Finishing DestroyComms");
