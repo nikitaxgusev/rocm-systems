@@ -513,12 +513,15 @@ namespace RcclUnitTesting
     int const cmd = TestBedChild::CHILD_DESTROY_GRAPHS;
     for (int currGroup = 0; currGroup < this->numGroupCalls; ++currGroup)
     {
+      // Send DestroyGraphs command to all active child processes first so they
+      // can work in parallel, then collect acknowledgements in a second pass.
       for (int childId = 0; childId < this->numActiveChildren; ++childId)
       {
-        // Send DestroyGraphs command to each active child process
         PIPE_WRITE(childId, cmd);
         PIPE_WRITE(childId, currGroup);
-
+      }
+      for (int childId = 0; childId < this->numActiveChildren; ++childId)
+      {
         // Wait for child acknowledgement
         PIPE_CHECK(childId);
       }
