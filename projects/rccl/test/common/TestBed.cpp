@@ -477,14 +477,27 @@ namespace RcclUnitTesting
 
     // Send DestroyComms command to all active child processes first so they can
     // work in parallel, then collect acknowledgements in a second pass.
+    using Clock = std::chrono::high_resolution_clock;
+    auto const sendStart = Clock::now();
     for (int childId = 0; childId < this->numActiveChildren; ++childId)
     {
       PIPE_WRITE(childId, cmd);
     }
+    auto const waitStart = Clock::now();
     for (int childId = 0; childId < this->numActiveChildren; ++childId)
     {
       // Wait for child acknowledgement
       PIPE_CHECK(childId);
+    }
+
+    if (ev.verbose)
+    {
+      using std::chrono::duration_cast;
+      using std::chrono::milliseconds;
+      auto const sendMs = duration_cast<milliseconds>(waitStart - sendStart).count();
+      auto const waitMs = duration_cast<milliseconds>(Clock::now() - waitStart).count();
+      TEST_INFO("DestroyComms: %d children, send %ld ms, parallel teardown %ld ms",
+                this->numActiveChildren, (long)sendMs, (long)waitMs);
     }
 
     // Close any open child processes
