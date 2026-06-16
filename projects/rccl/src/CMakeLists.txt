@@ -153,6 +153,7 @@ set(SRC_FILES
   include/nccl_device.h
   include/nccl_device/net_device.h
   include/net.h
+  include/net_telemetry.h
   include/nvmlwrap.h
   include/nvtx.h
   include/nvtx_payload_schemas.h
@@ -395,6 +396,7 @@ set(SRC_FILES
   transport/net_ib_cast/net_ib_cast_inspect.h
   transport/net_ib_cast/net_ib_fault_inject.h
   transport/net_ib/gdaki/gin_host_gdaki.h
+  transport/net_telemetry.cc
   transport/net_socket.cc
   transport/nvls.cc
   transport/p2p.cc
