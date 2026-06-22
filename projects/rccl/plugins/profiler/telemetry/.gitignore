@@ -1,0 +1,3 @@
+hipify-profiler/
+*.so
+*.prehip

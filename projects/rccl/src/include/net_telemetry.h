@@ -59,6 +59,36 @@ __attribute__((visibility("default")))
 void rcclTelemetrySnapshotEnd(const char* output_path);
 
 /*
+ * Lightweight per-device software-counter snapshot for per-collective bracketing.
+ *
+ * Unlike the SnapshotBegin/End pair (which forks ethtool and writes JSON), this
+ * only reads the atomic SW counters already maintained on the hot path. No file
+ * I/O, no subprocess, no global reset — cheap enough to call around every
+ * collective. A profiler plugin captures one at collective-start and one at
+ * collective-stop, then subtracts to get per-collective deltas.
+ */
+typedef struct {
+  int      device_id;
+  uint64_t tx_bytes;
+  uint64_t rx_bytes;
+  uint64_t num_cq_errors;
+  uint64_t wqe_sent;
+  uint64_t wqe_rcvd;
+  uint64_t wqe_completed;
+  int64_t  wqe_completion_ns_min;   /* min across QPs (0 = none seen) */
+  int64_t  wqe_completion_ns_max;   /* max across QPs */
+  uint64_t wqe_completion_histogram[RCCL_TELEMETRY_HISTOGRAM_SIZE]; /* summed across channels/QPs */
+} RcclTelemetrySwSnapshot;
+
+/*
+ * Capture current SW counters for up to maxDevs devices into out[].
+ * Returns the number of devices written (0 if telemetry disabled).
+ * Does NOT reset the underlying counters (whole-run flush stays intact).
+ */
+__attribute__((visibility("default")))
+int rcclTelemetrySwCapture(RcclTelemetrySwSnapshot* out, int maxDevs);
+
+/*
  * Configuration structure - populated from RCCL_TELEMETRY_CONFIG JSON file
  * or uses defaults if not specified
  */
