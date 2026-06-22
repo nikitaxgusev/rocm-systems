@@ -518,6 +518,57 @@ void rcclTelemetrySnapshotEnd(const char* output_path) {
   pthread_mutex_unlock(&rcclTelemetrySnapshotMutex);
 }
 
+__attribute__((visibility("default")))
+int rcclTelemetrySwCapture(RcclTelemetrySwSnapshot* out, int maxDevs) {
+  if (!rcclTelemetryEnabled || out == NULL || maxDevs <= 0) return 0;
+
+  int num_devs = __atomic_load_n(&rcclTelemetryNumDevs, __ATOMIC_ACQUIRE);
+  if (num_devs > RCCL_TELEMETRY_MAX_DEVS) num_devs = RCCL_TELEMETRY_MAX_DEVS;
+  if (num_devs > maxDevs) num_devs = maxDevs;
+
+  for (int i = 0; i < num_devs; i++) {
+    RcclDeviceStats* dev = &rcclTelemetryDevs[i];
+    RcclTelemetrySwSnapshot* s = &out[i];
+
+    s->device_id     = dev->device_id;
+    s->tx_bytes      = __atomic_load_n(&dev->tx_bytes,      __ATOMIC_RELAXED);
+    s->rx_bytes      = __atomic_load_n(&dev->rx_bytes,      __ATOMIC_RELAXED);
+    s->num_cq_errors = __atomic_load_n(&dev->num_cq_errors, __ATOMIC_RELAXED);
+    s->wqe_sent = s->wqe_rcvd = s->wqe_completed = 0;
+    s->wqe_completion_ns_min = 0;
+    s->wqe_completion_ns_max = 0;
+    for (int b = 0; b < RCCL_TELEMETRY_HISTOGRAM_SIZE; b++)
+      s->wqe_completion_histogram[b] = 0;
+
+    int nch = __atomic_load_n(&dev->num_channels, __ATOMIC_RELAXED);
+    if (nch > RCCL_TELEMETRY_MAX_CHANNELS) nch = RCCL_TELEMETRY_MAX_CHANNELS;
+    for (int c = 0; c < nch; c++) {
+      RcclChannelStats* ch = &dev->channels[c];
+      int nqp = __atomic_load_n(&ch->num_qps, __ATOMIC_RELAXED);
+      if (nqp > RCCL_TELEMETRY_MAX_QPS) nqp = RCCL_TELEMETRY_MAX_QPS;
+      for (int q = 0; q < nqp; q++) {
+        RcclQpStats* qp = &ch->qp[q];
+        s->wqe_sent      += __atomic_load_n(&qp->num_wqe_sent,      __ATOMIC_RELAXED);
+        s->wqe_rcvd      += __atomic_load_n(&qp->num_wqe_rcvd,      __ATOMIC_RELAXED);
+        s->wqe_completed += __atomic_load_n(&qp->num_wqe_completed, __ATOMIC_RELAXED);
+
+        int64_t qmin = __atomic_load_n(&qp->wqe_completion_ns_min, __ATOMIC_RELAXED);
+        int64_t qmax = __atomic_load_n(&qp->wqe_completion_ns_max, __ATOMIC_RELAXED);
+        if (qmin > 0 && (s->wqe_completion_ns_min == 0 || qmin < s->wqe_completion_ns_min))
+          s->wqe_completion_ns_min = qmin;
+        if (qmax > s->wqe_completion_ns_max)
+          s->wqe_completion_ns_max = qmax;
+
+        for (int b = 0; b < RCCL_TELEMETRY_HISTOGRAM_SIZE; b++)
+          s->wqe_completion_histogram[b] +=
+            __atomic_load_n(&qp->wqe_completion_histogram[b], __ATOMIC_RELAXED);
+      }
+    }
+  }
+
+  return num_devs;
+}
+
 int rcclTelemetryRegisterDevice(int device_id, const char* roce_device,
                                  const char* eth_device, const char* transport) {
   if (!rcclTelemetryEnabled) {

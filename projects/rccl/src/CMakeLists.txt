@@ -768,6 +768,11 @@ if(NCCL_OS_LINUX)
 elseif(NCCL_OS_WINDOWS)
   target_compile_definitions(rccl PRIVATE NCCL_OS_WINDOWS)
 endif()
+# The telemetry profiler plugin needs per-QP net profiler events (NetPlugin),
+# which are gated behind NCCL_ENABLE_NET_PROFILING. Enable it with the plugin.
+if(BUILD_TELEMETRY_PROFILER)
+  target_compile_definitions(rccl PRIVATE NCCL_ENABLE_NET_PROFILING)
+endif()
 if(USE_AMDSMI)
   target_compile_definitions(rccl PRIVATE USE_AMDSMI)
   if(AMDSMI_FABRIC_API)
