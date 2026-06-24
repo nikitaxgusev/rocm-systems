@@ -789,6 +789,9 @@ ncclResult_t IbCastGinIbProxyTest(void* collComm, void *request, int *done) {
 ncclResult_t IbCastGinIbProxyIFlush(void *ginCtx, int context, void* mhandle, uint32_t rank, void **request) {
   struct IbCastGinIbProxyCtx* ginProxyCtx = &((struct IbCastGinIbProxyCtx*)ginCtx)[context];
   struct ncclIbRecvComm* comm = (struct ncclIbRecvComm*)ginProxyCtx->fullRecvComm[rank];
+  // AINIC hard-disables GDR flush, so the gpuFlush QP may be absent (flushEnabled==0).
+  // Mirror IbCastIflush and treat that as a no-op instead of posting to a null QP.
+  if (comm == NULL || comm->flushEnabled == 0) return ncclSuccess;
   struct IbCastGinProxyMrHandle *ginMrHandle = (struct IbCastGinProxyMrHandle *)mhandle;
   struct ncclIbQp *qp = &comm->devs[0].gpuFlush.qp;
 
