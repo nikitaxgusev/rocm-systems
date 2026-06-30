@@ -28,6 +28,7 @@ The RCCL public repository is located at `<https://github.com/ROCm/rccl>`_.
 
     * :doc:`Using the RCCL Tuner plugin <./how-to/using-rccl-tuner-plugin-api>`
     * :doc:`Using the NCCL Net plugin <./how-to/using-nccl>`
+    * :doc:`Fault tolerance in RCCL <./how-to/fault-tolerance>`
     * :doc:`Troubleshoot RCCL <./how-to/troubleshooting-rccl>`
     * :doc:`RCCL usage tips <./how-to/rccl-usage-tips>`
 
