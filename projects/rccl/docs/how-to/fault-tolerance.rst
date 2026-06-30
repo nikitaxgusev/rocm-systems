@@ -104,46 +104,32 @@ that hits an asynchronous error usually stops making progress and never
 completes, so polling for it is the only reliable way to notice that something
 has gone wrong.
 
-Instead of calling ``hipStreamSynchronize`` (which can block forever if a
-collective is stuck), wait on the stream while also polling for asynchronous
-errors. When an error is detected, abort the communicator with
-:cpp:func:`ncclCommAbort`.
+When a communicator is created in non-blocking mode (``config.blocking = 0``),
+RCCL calls can return ``ncclInProgress`` before the operation has finished. Poll
+:cpp:func:`ncclCommGetAsyncError` until the communicator leaves the
+``ncclInProgress`` state, yielding the CPU between checks. The following helper is
+the pattern used by the RCCL MPI tests (see ``test/RevokeMPITests.cpp``):
 
 .. code-block:: cpp
 
-   int rcclStreamSynchronize(hipStream_t stream, ncclComm_t comm) {
-     hipError_t hipErr;
-     ncclResult_t rcclErr, rcclAsyncErr;
-     while (1) {
-       hipErr = hipStreamQuery(stream);
-       if (hipErr == hipSuccess)
-         return 0;
-
-       if (hipErr != hipErrorNotReady) {
-         printf("HIP Error : hipStreamQuery returned %d\n", hipErr);
-         return 1;
+   // Poll ncclCommGetAsyncError until the comm leaves ncclInProgress,
+   // yielding the CPU between checks. Returns the terminal state.
+   static ncclResult_t waitForAsyncResult(ncclComm_t comm)
+   {
+       ncclResult_t state = ncclInProgress;
+       while (state == ncclInProgress)
+       {
+           ncclResult_t r = ncclCommGetAsyncError(comm, &state);
+           if (r != ncclSuccess) return r;
+           if (state == ncclInProgress) sched_yield();
        }
-
-       rcclErr = ncclCommGetAsyncError(comm, &rcclAsyncErr);
-       if (rcclErr != ncclSuccess) {
-         printf("RCCL Error : ncclCommGetAsyncError returned %d\n", rcclErr);
-         return 1;
-       }
-
-       if (rcclAsyncErr != ncclSuccess) {
-         // An asynchronous error happened. Stop the operation and destroy
-         // the communicator.
-         rcclErr = ncclCommAbort(comm);
-         if (rcclErr != ncclSuccess)
-           printf("RCCL Error : ncclCommAbort returned %d\n", rcclErr);
-         // The caller can now abort or create a new communicator.
-         return 2;
-       }
-
-       // Let other threads (including RCCL background threads) use the CPU.
-       sched_yield();
-     }
+       return state;
    }
+
+If the terminal state is anything other than ``ncclSuccess``, the operation has
+failed and the communicator must be aborted with :cpp:func:`ncclCommAbort`. Once
+work has been enqueued on a stream, use ``hipStreamSynchronize`` to wait for the
+device-side collective to complete, as the tests do after each collective.
 
 .. _ft-recovery:
 
@@ -174,55 +160,31 @@ can leave a thread stuck inside an RCCL call indefinitely.
 
 When any rank in a communicator fails, every other rank must call
 :cpp:func:`ncclCommAbort` on its own communicator. The application decides when
-to abort and whether to restart. The following example initializes and splits a
-communicator in non-blocking mode so that it can be aborted at any point:
+to abort and whether to restart. The simplest recovery path is to abort the
+affected communicators on every rank, synchronize out of band, then rebuild and
+continue. The following sequence is taken from the ``Grow_ErrorRecoveryRegrow``
+test in ``test/GrowMPITests.cpp``:
 
 .. code-block:: cpp
 
-   bool globalFlag;
-   bool abortFlag = false;
-   ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
-   /* Set the communicator as non-blocking. */
-   config.blocking = 0;
-   CHECK(ncclCommInitRankConfig(&comm, nRanks, id, myRank, &config));
-   do {
-     CHECK(ncclCommGetAsyncError(comm, &state));
-   } while (state == ncclInProgress && checkTimeout() != true);
-
-   if (checkTimeout() == true || state != ncclSuccess) abortFlag = true;
-
-   /* Synchronize abortFlag across all healthy ranks. */
-   reportErrorGlobally(abortFlag, &globalFlag);
-
-   if (globalFlag) {
-     /* Timeout or init failure: every rank aborts and restarts. */
-     ncclCommAbort(comm);
-     /* restartNCCL is a user-provided function. It typically cleans up
-      * resources and calls ncclCommInitRankConfig() to rebuild communicators. */
-     restartNCCL(&comm);
+   // Simulate an error: abort the communicators on every rank.
+   ncclCommAbort(grownComm);
+   grownComm = nullptr;
+   if (initialComm) {
+       ncclCommAbort(initialComm);
+       initialComm = nullptr;
    }
 
-   /* Non-blocking communicator split. */
-   CHECK(ncclCommSplit(comm, color, key, &childComm, &config));
-   do {
-     CHECK(ncclCommGetAsyncError(comm, &state));
-   } while (state == ncclInProgress && checkTimeout() != true);
+   // Synchronize all ranks out of band before rebuilding.
+   MPI_Barrier(MPI_COMM_WORLD);
 
-   if (checkTimeout() == true || state != ncclSuccess) abortFlag = true;
+   // Recover: create a fresh communicator and grow it again.
+   buildComm(existing, &initialComm);
+   growByOne(initialComm, existing, &grownComm);
 
-   reportErrorGlobally(abortFlag, &globalFlag);
-
-   if (globalFlag) {
-     ncclCommAbort(comm);
-     if (childComm != NCCL_COMM_NULL) ncclCommAbort(childComm);
-     restartNCCL(&comm);
-   }
-   /* Application workload. */
-
-The ``checkTimeout`` and ``reportErrorGlobally`` helpers are supplied by the
-application. ``checkTimeout`` decides how long to wait for an RCCL operation
-before declaring it failed; ``reportErrorGlobally`` propagates the local decision
-to the other healthy ranks (for example over MPI or sockets).
+Here ``buildComm`` and ``growByOne`` are the application helpers shown in
+:ref:`ft-grow`; ``MPI_Barrier`` is the out-of-band synchronization point that
+ensures every rank has finished aborting before any rank starts rebuilding.
 
 .. _ft-shrink:
 
@@ -236,44 +198,48 @@ keep running.
 
 Pass a list of ranks to exclude. Only the ranks that will remain in the new
 communicator call :cpp:func:`ncclCommShrink`; the excluded ranks must not call
-it. RCCL re-orders the remaining ranks to keep the numbering contiguous.
+it. RCCL re-orders the remaining ranks to keep the numbering contiguous. The
+following example excludes the last rank, following the ``Grow_ThenShrink`` test
+in ``test/GrowMPITests.cpp``:
 
 .. code-block:: cpp
 
-   int excludeRanks[] = {1};  // Rank to exclude.
-   int excludeCount = 1;
-   ncclComm_t newcomm;
+   int        excludeRank = worldSize - 1;  // Rank to exclude.
+   ncclComm_t shrunkComm  = nullptr;
 
-   if (myRank != 1) {
-     ncclResult_t res = ncclCommShrink(comm, excludeRanks, excludeCount,
-                                       &newcomm, NULL, NCCL_SHRINK_DEFAULT);
-     if (res != ncclSuccess) {
-       // Handle error.
-     }
-     // Use newcomm for subsequent collectives, then destroy it when done.
-     ncclCommDestroy(newcomm);
+   if (wr != excludeRank) {
+       ncclResult_t res = ncclCommShrink(comm, &excludeRank, 1, &shrunkComm,
+                                         nullptr, NCCL_SHRINK_DEFAULT);
+       if (res != ncclSuccess) {
+           // Handle error.
+       }
+       // Use shrunkComm for subsequent collectives, then destroy it when done.
+       ncclCommDestroy(shrunkComm);
    }
 
 When you shrink **after** a failure, there may be operations still in flight on
 the parent communicator. Use the ``NCCL_SHRINK_ABORT`` flag so RCCL terminates
-those operations first, then builds the smaller communicator:
+those operations first, then builds the smaller communicator. This mirrors the
+``ShrinkAbort_InFlight_ChildWorks_RankRenumbering`` test:
 
 .. code-block:: cpp
 
-   if (myRank != 1) {
-     // NCCL_SHRINK_ABORT aborts in-progress work on the parent before shrinking.
-     ncclResult_t res = ncclCommShrink(comm, excludeRanks, excludeCount,
-                                       &newcomm, NULL, NCCL_SHRINK_ABORT);
-     // ...
+   if (wr != excludeRank) {
+       // NCCL_SHRINK_ABORT aborts in-progress work on the parent before shrinking.
+       ncclResult_t res = ncclCommShrink(comm, &excludeRank, 1, &shrunkComm,
+                                         nullptr, NCCL_SHRINK_ABORT);
+       ncclCommUserRank(shrunkComm, &childRank);   // ranks are renumbered
+       ncclCommCount(shrunkComm, &childSize);      // contiguous in the child
    }
 
 The two shrink flags are:
 
-* ``NCCL_SHRINK_DEFAULT`` -- shrink a healthy parent communicator that has no
-  outstanding operations.
+* ``NCCL_SHRINK_DEFAULT`` -- shrink a parent communicator that has no
+  outstanding operations, or one whose in-flight work was already aborted by
+  :cpp:func:`ncclCommRevoke` (see :ref:`ft-revoke`).
 * ``NCCL_SHRINK_ABORT`` -- first abort ongoing parent operations, then shrink.
-  Use this for fault-tolerance recovery, where the parent may be in an
-  inconsistent state.
+  Use this for fault-tolerance recovery when you shrink directly, without a
+  preceding revoke, and the parent may still have collectives in flight.
 
 .. _ft-grow:
 
@@ -287,43 +253,72 @@ replacement GPUs or nodes back in and return the job to full size.
 Growing requires coordination between the existing ranks and the new ranks. A
 coordinator rank from the existing communicator generates a unique ID with
 :cpp:func:`ncclCommGetUniqueId` and distributes it to the new ranks through an
-out-of-band channel (MPI, sockets, or shared memory). The parameter usage is:
+out-of-band channel (the RCCL tests use ``MPI_Bcast``). The parameter usage is:
 
-* Existing non-root rank: ``comm`` set, ``uniqueId = NULL``, ``rank = -1``.
-* Existing root (coordinator): ``comm`` set, ``uniqueId = &id``, ``rank = -1``.
-* New rank: ``comm = NULL``, ``uniqueId = &id``, ``rank =`` the assigned rank.
+* Existing ranks: ``comm`` set, ``rank = -1``. The coordinator (rank 0) passes
+  ``uniqueId = &growId``; other existing ranks may pass ``uniqueId = NULL``.
+* New ranks: ``comm = NULL``, ``uniqueId = &growId``, ``rank =`` the assigned rank.
+
+The following helper grows a communicator by one rank, following the
+``growByOne`` helper in ``test/GrowMPITests.cpp``:
 
 .. code-block:: cpp
 
-   // Step 1: The coordinator (for example rank 0) generates the grow ID.
-   ncclUniqueId growId;
-   if (myRank == 0) {
-     ncclResult_t res = ncclCommGetUniqueId(comm, &growId);
-     if (res != ncclSuccess) {
-       // Handle error.
-     }
-     // Distribute growId to all new ranks out of band (MPI, sockets, ...).
+   ncclResult_t growByOne(ncclComm_t existingComm, int existingNRanks,
+                          ncclComm_t* outComm)
+   {
+       const int wr       = world_rank;          // MPI world rank
+       const int newRank  = existingNRanks;      // the single new rank
+       const int newTotal = existingNRanks + 1;
+
+       // Coordinator (rank 0) generates the grow ID and broadcasts it.
+       ncclUniqueId growId{};
+       if (wr == 0) {
+           NCCLCHECK(ncclCommGetUniqueId(existingComm, &growId));
+       }
+       MPI_Bcast(&growId, sizeof(growId), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+       if (wr < existingNRanks) {
+           // Existing ranks: comm set, rank = -1.
+           NCCLCHECK(ncclCommGrow(existingComm, newTotal, &growId, -1,
+                                  outComm, nullptr));
+       } else if (wr == newRank) {
+           // New rank: comm = NULL, rank = assigned.
+           NCCLCHECK(ncclCommGrow(nullptr, newTotal, &growId, newRank,
+                                  outComm, nullptr));
+       }
+       return ncclSuccess;
    }
 
-   // Step 2: All existing ranks call ncclCommGrow.
-   ncclComm_t newcomm;
-   ncclResult_t res = ncclCommGrow(comm, 8, NULL, -1, &newcomm, NULL);
+For a non-blocking grow, pass a config with ``blocking = 0`` and poll for
+completion before using the new communicator, as in the ``Grow_NonBlocking``
+test:
 
-   // Step 3: New ranks call ncclCommGrow with the received growId.
-   hipSetDevice(myDevice);
-   res = ncclCommGrow(NULL, 8, &growId, myNewRank, &newcomm, NULL);
+.. code-block:: cpp
 
-   // Step 4: For non-blocking grow, poll until the operation completes.
-   ncclResult_t asyncErr;
-   do {
-     res = ncclCommGetAsyncError(newcomm, &asyncErr);
-   } while (asyncErr == ncclInProgress);
+   ncclConfig_t nbConfig = NCCL_CONFIG_INITIALIZER;
+   nbConfig.blocking = 0;
 
-   // Step 5: Use newcomm for collectives.
-   // Step 6: Destroy the parent communicator once grow has succeeded.
-   ncclCommDestroy(comm);
-   // Step 7: Destroy newcomm when finished.
-   ncclCommDestroy(newcomm);
+   if (wr < existing) {
+       ncclCommGrow(initialComm, worldSize, &growId, -1, &grownComm, &nbConfig);
+   } else if (wr == existing) {
+       ncclCommGrow(nullptr, worldSize, &growId, wr, &grownComm, &nbConfig);
+   }
+
+   ncclResult_t asyncErr = ncclInProgress;
+   while (asyncErr == ncclInProgress) {
+       ncclCommGetAsyncError(grownComm, &asyncErr);
+   }
+   // asyncErr == ncclSuccess once the grow has completed.
+
+After the grow succeeds, you can destroy the parent communicator and keep using
+the grown one (see the ``Grow_ParentDestroyAfterGrow`` test):
+
+.. code-block:: cpp
+
+   ncclCommDestroy(initialComm);   // parent no longer needed
+   // ... collectives on grownComm ...
+   ncclCommDestroy(grownComm);     // when finished
 
 Keep these constraints in mind:
 
@@ -352,23 +347,52 @@ finishes, the abort flag is cleared and the communicator becomes valid again as 
 
 Revoke is intended for recovery scenarios where a peer has failed in the middle
 of a collective. Because in-flight collectives are aborted rather than drained,
-the output buffers of an aborted collective contain undefined data. This is the
-key difference from :cpp:func:`ncclCommFinalize`, which drains outstanding work;
-calling :cpp:func:`ncclCommFinalize` on a revoked communicator is invalid and
-returns ``ncclInvalidUsage``.
+the output buffers of an aborted collective contain undefined data.
+
+The typical recovery flow is *collective -> revoke -> shrink -> collective*, as
+exercised by the ``Collective_Revoke_Shrink_Collective`` test in
+``test/RevokeMPITests.cpp``:
 
 .. code-block:: cpp
 
-   // Abort in-flight work but keep comm usable as a shrink/grow parent.
-   ncclResult_t res = ncclCommRevoke(comm, NCCL_REVOKE_DEFAULT);
-   if (res != ncclSuccess) {
-     // Handle error.
+   // A collective is in flight on the parent when a peer fails.
+   ncclAllReduce(send_buf, recv_buf, count, ncclFloat, ncclSum, parent, stream);
+
+   // Revoke aborts the in-flight collective but keeps the parent usable.
+   ncclCommRevoke(parent, NCCL_REVOKE_DEFAULT);
+
+   MPI_Barrier(MPI_COMM_WORLD);
+
+   // Build a smaller communicator from the survivors. Because revoke already
+   // aborted the in-flight work, NCCL_SHRINK_DEFAULT is used here (not ABORT).
+   ncclComm_t child = NCCL_COMM_NULL;
+   if (!isExcluded) {
+       ncclCommShrink(parent, excludeList.data(), excludeList.size(),
+                      &child, nullptr, NCCL_SHRINK_DEFAULT);
    }
 
-   // After the revoke completes, build a smaller communicator from the survivors.
-   ncclComm_t newcomm;
-   res = ncclCommShrink(comm, excludeRanks, excludeCount, &newcomm, NULL,
-                        NCCL_SHRINK_ABORT);
+   MPI_Barrier(MPI_COMM_WORLD);
+
+   // Continue on the child communicator.
+   if (!isExcluded) {
+       ncclAllReduce(send_buf, recv_buf, count, ncclFloat, ncclSum, child, stream);
+       hipStreamSynchronize(stream);
+   }
+
+The RCCL revoke tests establish the following contract:
+
+* After a revoke, any newly enqueued collective on the revoked communicator
+  returns ``ncclInvalidUsage`` (``Revoke_RejectsCollectives``).
+* A revoked communicator is still valid as a parent for
+  :cpp:func:`ncclCommSplit` and :cpp:func:`ncclCommShrink`
+  (``Revoke_ThenSplit_ChildWorks``, ``RevokeThenShrink_ChildWorks``).
+* A revoked communicator can be torn down cleanly with
+  :cpp:func:`ncclCommDestroy` (``Revoke_ThenDestroy_CleanLifecycle``).
+* Revoking the same communicator twice is rejected with ``ncclInvalidArgument``
+  (``Revoke_DoubleRevoke_Rejected``).
+* Calling :cpp:func:`ncclCommFinalize` on a revoked communicator is rejected with
+  ``ncclInvalidUsage`` -- use :cpp:func:`ncclCommDestroy` instead
+  (``Revoke_ThenFinalize_Rejected``).
 
 Pass ``NCCL_REVOKE_DEFAULT`` for ``revokeFlags``; any other value is rejected
 with ``ncclInvalidArgument``.
@@ -427,10 +451,22 @@ Best practices
   relying on ``hipStreamSynchronize`` alone.
 * When one rank decides to abort, propagate that decision to all healthy ranks
   out of band, and have every rank abort its own communicator.
-* Prefer :cpp:func:`ncclCommShrink` with ``NCCL_SHRINK_ABORT`` (optionally after
-  :cpp:func:`ncclCommRevoke`) over a full job restart when only some ranks fail.
+* When only some ranks fail, prefer shrinking over a full job restart. Either
+  shrink directly with ``NCCL_SHRINK_ABORT`` to terminate in-flight work, or call
+  :cpp:func:`ncclCommRevoke` first and then shrink with ``NCCL_SHRINK_DEFAULT``.
 * Use the ROCm tooling (``amd-smi``, ``rocminfo``, ``ibv_devinfo``) and RAS logs
   to diagnose the root cause before re-creating communicators.
+
+Worked examples
+===============
+
+The RCCL MPI test suite is the authoritative source of working examples for
+these APIs. See:
+
+* ``test/GrowMPITests.cpp`` -- grow, non-blocking grow, grow/shrink elastic
+  cycles, and abort/recreate error recovery.
+* ``test/RevokeMPITests.cpp`` -- revoke, revoke -> split, revoke -> shrink,
+  ``NCCL_SHRINK_ABORT``, and non-blocking revoke.
 
 Related links
 =============
