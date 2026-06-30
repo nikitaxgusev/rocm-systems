@@ -1,6 +1,6 @@
 .. meta::
    :description: How RCCL handles errors and supports fault tolerance for multi-GPU and multi-node collective communication on AMD GPUs
-   :keywords: RCCL, ROCm, AMD, fault tolerance, error handling, communicator abort, shrink, grow, revoke, suspend, resume
+   :keywords: RCCL, ROCm, AMD, fault tolerance, error handling, communicator abort, shrink, grow, revoke
 
 .. _fault-tolerance:
 
@@ -163,8 +163,6 @@ of the job you want to preserve when a fault occurs:
 * **Revoke** (RCCL-specific) the communicator to abort in-flight work without
   destroying the communicator, so it can be reused as a parent for a subsequent
   shrink or grow.
-* **Suspend and resume** (RCCL-specific) to release a communicator's resources
-  temporarily, for example to free GPU memory during a checkpoint.
 
 To abort communicators safely, the application must create them in non-blocking
 mode and make sure no thread is inside an RCCL call when
@@ -374,35 +372,6 @@ returns ``ncclInvalidUsage``.
 
 Pass ``NCCL_REVOKE_DEFAULT`` for ``revokeFlags``; any other value is rejected
 with ``ncclInvalidArgument``.
-
-.. _ft-suspend-resume:
-
-Suspending and resuming a communicator (RCCL extension)
-=======================================================
-
-RCCL exposes :cpp:func:`ncclCommSuspend` and :cpp:func:`ncclCommResume` to
-release a communicator's resources temporarily and reacquire them later. This is
-useful for elastic workloads and checkpointing: a suspended communicator can free
-GPU memory while the application performs other work, then resume exactly where
-it left off.
-
-Pass a bitmask of ``NCCL_SUSPEND_*`` flags to select which resources to release.
-``NCCL_SUSPEND_MEM`` releases the communicator's dynamic GPU memory allocations.
-A suspended communicator cannot be used until :cpp:func:`ncclCommResume` is
-called, which reacquires every resource that the matching suspend released.
-
-.. code-block:: cpp
-
-   // Release the communicator's dynamic GPU memory while it is idle.
-   ncclResult_t res = ncclCommSuspend(comm, NCCL_SUSPEND_MEM);
-   if (res != ncclSuccess) {
-     // Handle error.
-   }
-
-   // ... do other work, free for the application to use the GPU memory ...
-
-   // Reacquire the resources before using the communicator again.
-   res = ncclCommResume(comm);
 
 .. _ft-finalize-destroy:
 
