@@ -72,15 +72,44 @@ Asynchronous errors
 
 Network failures are not reported by the originating call; they surface later
 through :cpp:func:`ncclCommGetAsyncError`. In non-blocking mode, poll it until the
-communicator leaves the ``ncclInProgress`` state.
+communicator leaves the ``ncclInProgress`` state, yielding the CPU between checks.
 
 .. code-block:: cpp
 
-   ncclResult_t state = ncclInProgress;
-   while (state == ncclInProgress) {
-       ncclCommGetAsyncError(comm, &state);
+   #include <sched.h>
+
+   // Wait for a non-blocking communicator to reach a terminal state.
+   ncclResult_t waitForAsyncResult(ncclComm_t comm) {
+       ncclResult_t state = ncclInProgress;
+       while (state == ncclInProgress) {
+           ncclResult_t err = ncclCommGetAsyncError(comm, &state);
+           if (err != ncclSuccess) return err;   // failed to query the state
+           if (state == ncclInProgress) sched_yield();
+       }
+       return state;
    }
-   if (state != ncclSuccess) ncclCommAbort(comm);
+
+When waiting for a collective to finish, query the stream and poll for
+asynchronous errors at the same time, instead of blocking in
+``hipStreamSynchronize``, which can hang forever if a peer has failed.
+
+.. code-block:: cpp
+
+   int streamSyncWithAbort(hipStream_t stream, ncclComm_t comm) {
+       while (true) {
+           hipError_t hipErr = hipStreamQuery(stream);
+           if (hipErr == hipSuccess) return 0;                 // collective done
+           if (hipErr != hipErrorNotReady) return 1;           // HIP failure
+
+           ncclResult_t asyncErr = ncclSuccess;
+           ncclCommGetAsyncError(comm, &asyncErr);
+           if (asyncErr != ncclSuccess) {                      // peer/network died
+               ncclCommAbort(comm);
+               return 2;
+           }
+           sched_yield();
+       }
+   }
 
 .. _ft-recovery:
 
@@ -110,9 +139,29 @@ Remaining ranks are renumbered contiguously.
 
 .. code-block:: cpp
 
-   int excludeRank = nRanks - 1;
-   ncclComm_t newComm = nullptr;
-   ncclCommShrink(comm, &excludeRank, 1, &newComm, nullptr, NCCL_SHRINK_DEFAULT);
+   // Drop one failed rank and continue on the survivors.
+   int        excludeList[] = { failedRank };
+   int        excludeCount  = 1;
+   ncclComm_t newComm       = nullptr;
+
+   if (myRank != failedRank) {
+       ncclResult_t res = ncclCommShrink(comm, excludeList, excludeCount,
+                                         &newComm, nullptr, NCCL_SHRINK_ABORT);
+       if (res != ncclSuccess) {
+           ncclCommAbort(comm);
+           return res;
+       }
+
+       // newComm has (nRanks - excludeCount) ranks, renumbered 0..N-1.
+       int newRank = -1, newSize = 0;
+       ncclCommUserRank(newComm, &newRank);
+       ncclCommCount(newComm, &newSize);
+
+       // ... run collectives on newComm ...
+
+       ncclCommDestroy(newComm);
+   }
+   ncclCommDestroy(comm);   // parent no longer needed
 
 Shrink flags:
 
@@ -128,18 +177,52 @@ Growing a communicator
 
 :cpp:func:`ncclCommGrow` creates a new communicator by adding ranks. A
 coordinator generates a unique ID with :cpp:func:`ncclCommGetUniqueId` and
-distributes it to the new ranks out of band.
+distributes it to the new ranks out of band (here using ``MPI_Bcast``).
 
 * Existing ranks: ``comm`` set, ``rank = -1`` (the coordinator passes the ID).
 * New ranks: ``comm = NULL``, ``rank =`` the assigned rank, with the ID.
 
 .. code-block:: cpp
 
-   // Existing ranks
-   ncclCommGrow(comm, newTotal, &growId, -1, &newComm, nullptr);
+   // Grow a communicator of `existing` ranks up to `newTotal` ranks.
+   ncclComm_t newComm = nullptr;
 
-   // New ranks
-   ncclCommGrow(nullptr, newTotal, &growId, newRank, &newComm, nullptr);
+   // 1. Coordinator generates the grow ID and broadcasts it to everyone.
+   ncclUniqueId growId{};
+   if (myRank == 0) {
+       ncclCommGetUniqueId(comm, &growId);
+   }
+   MPI_Bcast(&growId, sizeof(growId), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+   // 2. Existing and new ranks call grow with the matching arguments.
+   if (myRank < existing) {
+       ncclCommGrow(comm, newTotal, &growId, -1, &newComm, nullptr);
+   } else {
+       hipSetDevice(localDevice);
+       ncclCommGrow(nullptr, newTotal, &growId, myRank, &newComm, nullptr);
+   }
+
+For a non-blocking grow, pass a config with ``blocking = 0`` and poll for
+completion before using the new communicator.
+
+.. code-block:: cpp
+
+   ncclConfig_t config = NCCL_CONFIG_INITIALIZER;
+   config.blocking = 0;
+
+   if (myRank < existing) {
+       ncclCommGrow(comm, newTotal, &growId, -1, &newComm, &config);
+   } else {
+       ncclCommGrow(nullptr, newTotal, &growId, myRank, &newComm, &config);
+   }
+
+   ncclResult_t asyncErr = ncclInProgress;
+   while (asyncErr == ncclInProgress) {
+       ncclCommGetAsyncError(newComm, &asyncErr);
+   }
+   // asyncErr == ncclSuccess once the grow has completed.
+
+   ncclCommDestroy(comm);   // parent can be released after a successful grow
 
 Notes:
 
@@ -157,13 +240,33 @@ Revoking a communicator (RCCL extension)
 the communicator, so it can recover from a peer that failed mid-collective.
 Output buffers of an aborted collective contain undefined data.
 
-The typical flow is *revoke, then shrink, then continue*. Because revoke already
-aborts in-flight work, the shrink uses ``NCCL_SHRINK_DEFAULT``.
+The typical flow is *collective, revoke, shrink, continue*. Because revoke
+already aborts in-flight work, the shrink uses ``NCCL_SHRINK_DEFAULT``.
 
 .. code-block:: cpp
 
+   // A collective is in flight on the parent when a peer fails.
+   ncclAllReduce(sendBuf, recvBuf, count, ncclFloat, ncclSum, parent, stream);
+
+   // 1. Revoke aborts the in-flight collective but keeps `parent` usable.
    ncclCommRevoke(parent, NCCL_REVOKE_DEFAULT);
-   ncclCommShrink(parent, excludeList, excludeCount, &child, nullptr, NCCL_SHRINK_DEFAULT);
+   MPI_Barrier(MPI_COMM_WORLD);   // all healthy ranks agree to recover
+
+   // 2. Build a smaller communicator from the survivors (DEFAULT, not ABORT).
+   ncclComm_t child = NCCL_COMM_NULL;
+   if (myRank != failedRank) {
+       ncclCommShrink(parent, excludeList, excludeCount,
+                      &child, nullptr, NCCL_SHRINK_DEFAULT);
+   }
+   MPI_Barrier(MPI_COMM_WORLD);
+
+   // 3. Continue on the child communicator.
+   if (child != NCCL_COMM_NULL) {
+       ncclAllReduce(sendBuf, recvBuf, count, ncclFloat, ncclSum, child, stream);
+       hipStreamSynchronize(stream);
+       ncclCommDestroy(child);
+   }
+   ncclCommDestroy(parent);
 
 Behavior:
 
@@ -182,7 +285,20 @@ Finalizing and destroying
 =========================
 
 For a clean shutdown, call :cpp:func:`ncclCommFinalize` to drain outstanding
-operations (the state returns to ``ncclSuccess`` once quiescent), then
-:cpp:func:`ncclCommDestroy` to free resources. Do not access a communicator after
-it is destroyed. Use :cpp:func:`ncclCommAbort` instead when the communicator is
-in a bad state and outstanding operations cannot be drained.
+operations, then :cpp:func:`ncclCommDestroy` to free resources.
+
+.. code-block:: cpp
+
+   // Clean shutdown: drain, then free.
+   ncclCommFinalize(comm);                 // moves comm to ncclInProgress
+
+   ncclResult_t state = ncclInProgress;
+   while (state == ncclInProgress) {       // wait until globally quiescent
+       ncclCommGetAsyncError(comm, &state);
+   }
+
+   ncclCommDestroy(comm);                  // non-blocking once state is ncclSuccess
+
+Do not access a communicator after it is destroyed. Use
+:cpp:func:`ncclCommAbort` instead when the communicator is in a bad state and
+outstanding operations cannot be drained.
