@@ -143,6 +143,7 @@ extern bool IbCastUseInline;
 #define WR_IMM_RX_REQ_IDX_SHIFT 24
 #define WR_IMM_SPLIT_DATA_FLAG  0x00800000
 #define WR_IMM_SIZE_MASK        0x007fffff
+#define WR_IMM_RX_REQ_GEN_MASK  0x007fffff
 extern int IbCastGdrFlushDisable;
 extern bool IbCastAinicRoce;
 extern bool rcclCtsInlineData;

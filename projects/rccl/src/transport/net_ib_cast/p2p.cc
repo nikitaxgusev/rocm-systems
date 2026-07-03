@@ -153,6 +153,8 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
       if (nqps > 1) {
         immData |= WR_IMM_SPLIT_DATA_FLAG;
       }
+      // Tag imm with receiver slot generation (idx) for stale-completion detection.
+      immData |= ((uint32_t)slots[0].idx & WR_IMM_RX_REQ_GEN_MASK);
     }
 
     
@@ -742,7 +744,11 @@ static inline ncclResult_t IbCastRequestRetrieveFromCompletion(struct ncclIbNetC
     struct ncclIbRecvComm* recvComm = (struct ncclIbRecvComm*)base;
     *req = recvComm->recvReqs[be32toh(wc->imm_data) % NET_IB_MAX_REQUESTS];
   } else if (!base->isSend && wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM && base->recvMatchingScheme == BY_INDEX) {
-    *req = &base->reqs[((be32toh(wc->imm_data) >> WR_IMM_RX_REQ_IDX_SHIFT) & WR_IMM_RX_REQ_IDX_MASK)];
+    struct ncclIbRecvComm* recvComm = (struct ncclIbRecvComm*)base;
+    uint32_t immGen = be32toh(wc->imm_data) & WR_IMM_RX_REQ_GEN_MASK;
+    uint64_t rxReqId = (uint64_t)(immGen - 1u);
+    *req = recvComm->recvReqs[rxReqId % NET_IB_MAX_REQUESTS];
+    if (*req == NULL) *req = &base->reqs[((be32toh(wc->imm_data) >> WR_IMM_RX_REQ_IDX_SHIFT) & WR_IMM_RX_REQ_IDX_MASK)];
   } else if (!base->isSend && wc->opcode == IBV_WC_RDMA_READ) { // Flush request completion
     NCCLCHECK(IbCastRequestRetrieveAsIndex(base->reqs, (wc->wr_id - NCCL_IB_FLUSH_REQ_WR_ID_OFFSET), req));
   } else if (!base->isSend) {
@@ -969,15 +975,27 @@ static inline ncclResult_t IbCastCompletionEventProcess(struct ncclIbNetCommBase
     }
   } else {
     if (wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+      struct ncclIbRecvComm* recvComm = (struct ncclIbRecvComm*)commBase;
+      bool staleRecvReq = (req->type != NCCL_NET_IB_REQ_RECV);
+      bool genMismatch = false;
+      if (!staleRecvReq && commBase->recvMatchingScheme == BY_INDEX) {
+        uint32_t immGen  = be32toh(wc->imm_data) & WR_IMM_RX_REQ_GEN_MASK;
+        uint32_t slotGen = (uint32_t)(req->id + 1) & WR_IMM_RX_REQ_GEN_MASK;
+        if (immGen != slotGen) {
+          staleRecvReq = true;
+          genMismatch = true;
+        }
+      }
+
       if (req->type == NCCL_NET_IB_REQ_UNUSED && commBase->resiliency) {
         INFO(NCCL_NET, "NET/IB: %s: Receiver got a completion for a data transfer but retrieved an 'unused' request (req=%p, comm=%p, id=%ld, wc.status=%s(%d), wc.wr_id=%ld, wc.imm_data=%d, wc.opcode=%s(%d), wc.qp_num=%u)", __func__, req, commBase, req->id, ibvWcStatusStr(wc->status), wc->status, wc->wr_id, be32toh(wc->imm_data), ibvWcOpcodeStr(wc->opcode), wc->opcode, wc->qp_num);
         return ncclSuccess;
       }
-      if (req->type != NCCL_NET_IB_REQ_RECV && !commBase->resiliency) {
-        WARN("NET/IB: %s: Receiver expected a 'recv' request but got '%s' (req=%p, comm=%p, id=%ld, wc.wr_id=%ld, wc.status=%s(%d) wc.opcode=%s(%d), wc.qp_num=%u)", __func__, IbCastReqTypeStr[req->type], req, req->base, req->id, wc->wr_id, ibvWcStatusStr(wc->status), wc->status, ibvWcOpcodeStr(wc->opcode), wc->opcode, wc->qp_num);
-        return ncclInternalError;
+      if (staleRecvReq) {
+        INFO(NCCL_NET, "NET/IB: %s: draining a stale recv completion for a %s slot (req=%p, comm=%p, id=%ld, type=%s, gen_mismatch=%d, wc.wr_id=%ld, wc.imm_data=%d, wc.opcode=%s(%d), wc.qp_num=%u)", __func__, genMismatch ? "recycled" : "freed", req, req->base, req->id, IbCastReqTypeStr[req->type], genMismatch, wc->wr_id, be32toh(wc->imm_data), ibvWcOpcodeStr(wc->opcode), wc->opcode, wc->qp_num);
       }
-      if (req->nreqs == 1) {
+
+      if (!staleRecvReq && req->nreqs == 1) {
         if (commBase->recvMatchingScheme != BY_ID) {
           req->recv.cmplsRecords->sizes[0] += wc->byte_len;
         } else if (req->recv.cmplsRecords->sizes[0] == 0) {
@@ -985,20 +1003,29 @@ static inline ncclResult_t IbCastCompletionEventProcess(struct ncclIbNetCommBase
         }
       }
       TRACE(NCCL_NET, "NET/IB: %s: Got completion for a recv request (req=%p, comm=%p, id=%ld, devIndex=%d, qp_num=%u)", __func__, req, req->base, req->id, devIndex, wc->qp_num);
-      struct ncclIbRecvComm* recvComm = (struct ncclIbRecvComm*)commBase;
 
       if (recvComm->prepostReceiveWorkRequests) {
         // Post another receive work request on the QP
         ncclIbQp* qp = NULL;
         int qpIndex = -1;
         NCCLCHECK(IbCastCommBaseGetQpByQpNum(commBase, devIndex, wc->qp_num, &qp, &qpIndex));
-        req->recv.cmplsRecords->completions[qpIndex] = 1;
+        if (!staleRecvReq) req->recv.cmplsRecords->completions[qpIndex] = 1;
         IbCastPostRecvWorkRequest(qp->qp, &recvComm->ibRecvWorkRequest);
       } else {
-        // In the prepost path wr_id is UINT64_MAX (sentinel); only decrement rxPosts
-        // in the non-prepost path where wr_id is a valid slot index.
-        commBase->rxPosts[wc->wr_id]--;
+        int qpIndex = (int)wc->wr_id;
+        commBase->rxPosts[qpIndex]--;
+        // Re-post a WR when a stale completion consumed one from the pool.
+        if (staleRecvReq && commBase->rxPosts[qpIndex] < NET_IB_MAX_REQUESTS) {
+          ncclIbQp* rqp = NULL;
+          int rqpIndex = -1;
+          NCCLCHECK(IbCastCommBaseGetQpByQpNum(commBase, devIndex, wc->qp_num, &rqp, &rqpIndex));
+          recvComm->ibRecvWorkRequest.wr_id = qpIndex;
+          NCCLCHECK(IbCastPostRecvWorkRequest(rqp->qp, &recvComm->ibRecvWorkRequest));
+          commBase->rxPosts[qpIndex]++;
+        }
       }
+
+      if (staleRecvReq) return ncclSuccess;
 
       if (commBase->recvMatchingScheme == BY_INDEX) {
         if (be32toh(wc->imm_data) & WR_IMM_SPLIT_DATA_FLAG) {
