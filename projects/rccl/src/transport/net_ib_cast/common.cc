@@ -22,7 +22,7 @@ ncclProfilerCallback_t IbCastProfilerFunction;
 NCCL_PARAM(IbCastSplitDataOnQps, "IB_SPLIT_DATA_ON_QPS", 0);
 NCCL_PARAM(IbCastPrepostReceiveWorkRequests, "IB_PREPOST_RECEIVE_WORK_REQUESTS", -2);
 NCCL_PARAM(IbCastAsyncEvents,"IB_RETURN_ASYNC_EVENTS",1);
-extern int ncclParamIbCastReceiverSideMatchingScheme();
+extern int64_t ncclParamIbCastReceiverSideMatchingScheme();
 extern int ncclParamIbCastOooRq();
 extern int ncclParamIbCastResiliencyPortFailover();
 
@@ -74,6 +74,42 @@ ncclResult_t IbCastBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
   }
 
   return ncclSuccess;
+}
+
+static const char* IbCastMatchingSchemeStr(int scheme) {
+  switch (scheme) {
+    case BY_INDEX: return "BY_INDEX";
+    case BY_ID: return "BY_ID";
+    case BY_ORDER: return "BY_ORDER";
+    default: return "UNKNOWN";
+  }
+}
+
+int IbCastResolveRecvMatchingScheme(bool useCtsOffload, bool isP2p) {
+  int requested = (int)ncclParamIbCastReceiverSideMatchingScheme();
+
+  if (ncclParamIbCastOooRq() || (ncclParamIbCastResiliencyPortFailover() == 1)) {
+    return BY_ID;
+  }
+
+  if (useCtsOffload) {
+    if (requested != -2 && requested != BY_ORDER) {
+      INFO(NCCL_NET, "NET/IB: %s: CTS offload requires BY_ORDER; overriding scheme %d", __func__, requested);
+    }
+    return BY_ORDER;
+  }
+
+  if (requested == BY_ORDER) {
+    WARN("NET/IB: %s: BY_ORDER requires CTS offload; falling back to %s (%d)",
+         __func__, IbCastMatchingSchemeStr(BY_INDEX), BY_INDEX);
+    return BY_INDEX;
+  }
+
+  if (requested != -2) {
+    return requested;
+  }
+
+  return BY_INDEX;
 }
 
 ncclResult_t IbCastRecvCommInit(struct ncclIbRecvComm* recvComm) {
