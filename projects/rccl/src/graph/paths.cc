@@ -1163,6 +1163,10 @@ NCCL_PARAM(MaxP2pNChannels, "MAX_P2P_NCHANNELS", MAXCHANNELS);
 // When enabled, caps p2pnChannels to 16 on gfx950 (MI350) for large-scale jobs
 // (nNodes >= 16) to reduce P2P CU usage. Disabled by default.
 NCCL_PARAM(P2pCuReduceScaleEnable, "P2P_CU_REDUCE_SCALE_ENABLE", 0);
+// gfx942+GDR: concurrent NIC GDR contexts ~ p2pnChannels*(nNodes-1); too many
+// stall large transfers at scale. Cap channels so that product stays within a
+// tunable budget (back-fit: 6 nodes->4 ch), scaling down as nodes grow.
+RCCL_PARAM(Gfx942NetP2pGdrBudget, "GFX942_NET_P2P_GDR_BUDGET", 20);
 extern int64_t ncclParamWorkArgsBytes();
 
 ncclResult_t ncclTopoComputeP2pChannelsPerPeer(struct ncclComm* comm) {
@@ -1225,6 +1229,18 @@ ncclResult_t ncclTopoComputeP2pChannels(struct ncclComm* comm) {
     if (((comm->nNodes == 2 && comm->topo->nRanks == 8) || (comm->nNodes == 4 && comm->topo->nRanks == 16)) && (IsArchMatch(comm->topo->nodes[GPU].nodes[0].gpu.gcn, "gfx950"))) comm->p2pnChannels = std::min(comm->p2pnChannels, 16);
     // Opt-in P2P CU reduction on gfx950 (MI350) at scale: cap p2pnChannels to 16 when nNodes >= 16
     if (ncclParamP2pCuReduceScaleEnable() && comm->nNodes >= 16 && IsArchMatch(comm->topo->nodes[GPU].nodes[0].gpu.gcn, "gfx950")) comm->p2pnChannels = std::min(comm->p2pnChannels, 16);
+    {
+      int budget = (int)rcclParamGfx942NetP2pGdrBudget();
+      if (budget > 0 && comm->nNodes >= 5 &&
+          IsArchMatch(comm->topo->nodes[GPU].nodes[0].gpu.gcn, "gfx942")) {
+        int cap = std::max(1, budget / (comm->nNodes - 1));
+        if (comm->p2pnChannels > cap) {
+          INFO(NCCL_TUNING, "RCCL gfx942 net p2pnChannels capped %d -> %d (nNodes=%d) to bound AINIC GDR concurrency",
+               comm->p2pnChannels, cap, comm->nNodes);
+          comm->p2pnChannels = cap;
+        }
+      }
+    }
     comm->p2pnChannelsPerPeer = std::min(comm->p2pnChannelsPerPeer, MAXCHANNELS);
   }
 
