@@ -828,11 +828,12 @@ ib_recv_dev_list:
   // Read isP2p from handle
   isP2p = handle->isP2p;
   comm->useCtsOffload = IbCastIsCtsOffloadEnabled(isP2p) && !handle->isRMA;
-  if (comm->useCtsOffload) {
-    comm->base.recvMatchingScheme = BY_ORDER;
-  }
+  comm->base.recvMatchingScheme = IbCastResolveRecvMatchingScheme(comm->useCtsOffload, isP2p);
 
-  INFO(NCCL_NET, "NET/IB: IbCastConnect isP2p=%d isRMA=%d", isP2p, handle->isRMA);
+  INFO(NCCL_NET, "NET/IB: IbCastConnect isP2p=%d isRMA=%d useCtsOffload=%d recvMatchingScheme=%d (%s)",
+       isP2p, handle->isRMA, comm->useCtsOffload, comm->base.recvMatchingScheme,
+       comm->base.recvMatchingScheme == BY_INDEX ? "BY_INDEX" :
+       comm->base.recvMatchingScheme == BY_ID ? "BY_ID" : "BY_ORDER");
   comm->base.nqps = IbCastCalculateNqps(isP2p, comm->base.vProps.ndevs, 
                                          remoteVProps.ndevs, __func__);
   if (handle->isRMA) {
@@ -867,6 +868,7 @@ ib_recv_dev_list:
   meta.ndevs = comm->base.vProps.ndevs;
   meta.isP2p = isP2p;
   meta.isRMA = handle->isRMA;
+  meta.recvMatchingScheme = comm->base.recvMatchingScheme;
 
   // Create QPs on the sender side
   NCCLCHECKGOTO(IbCastSenderQpsCreate(comm, &meta, channelId), ret, fail);
@@ -955,7 +957,13 @@ ib_connect:
 
   memcpy(&remMeta, stage->buffer, sizeof(ncclIbConnectionMetadata));
 
-  // ensure that the remote devices have the same link layer than the local devices used in the connection.
+  if (remMeta.recvMatchingScheme >= BY_INDEX && remMeta.recvMatchingScheme <= BY_ORDER &&
+      remMeta.recvMatchingScheme != comm->base.recvMatchingScheme) {
+    WARN("NET/IB: %s: recvMatchingScheme mismatch with acceptor (local=%d remote=%d); keeping local",
+         __func__, comm->base.recvMatchingScheme, remMeta.recvMatchingScheme);
+  }
+
+  // ensure that the remote devices have the same link layer
   if (comm->base.vProps.ndevs > 0) {
     int ibDev0 = comm->devs[0].base.ibDevN;
     link_layer = IbCastDevs[ibDev0].portAttr.link_layer;
@@ -1389,10 +1397,28 @@ ib_recv:
   memcpy(&remMeta, stage->buffer, sizeof(struct ncclIbConnectionMetadata));
 
   rComm->useCtsOffload = IbCastIsCtsOffloadEnabled(remMeta.isP2p);
-  if (rComm->useCtsOffload) {
-    rComm->base.recvMatchingScheme = BY_ORDER;
+  {
+    int localScheme = IbCastResolveRecvMatchingScheme(rComm->useCtsOffload, remMeta.isP2p);
+    if (remMeta.recvMatchingScheme == BY_ORDER && !rComm->useCtsOffload) {
+      WARN("NET/IB: %s: peer uses BY_ORDER (CTS offload) but local CTS offload is disabled; "
+           "align RCCL_CTS_OFFLOAD_ENABLED and RCCL_IB_P2P_DISABLE_CTS on all ranks", __func__);
+      return ncclInvalidUsage;
+    }
+    if (remMeta.recvMatchingScheme >= BY_INDEX && remMeta.recvMatchingScheme <= BY_ORDER) {
+      if (remMeta.recvMatchingScheme != localScheme) {
+        WARN("NET/IB: %s: recvMatchingScheme mismatch (local=%d remote=%d); using remote",
+             __func__, localScheme, remMeta.recvMatchingScheme);
+      }
+      rComm->base.recvMatchingScheme = remMeta.recvMatchingScheme;
+    } else {
+      rComm->base.recvMatchingScheme = localScheme;
+    }
   }
-  INFO(NCCL_NET, "NET/IB: ncclIbAccept isP2p=%d useCtsOffload=%d (IbP2pDisableCts=%d)", remMeta.isP2p, rComm->useCtsOffload, rcclParamIbCastP2pDisableCts());
+  INFO(NCCL_NET, "NET/IB: ncclIbAccept isP2p=%d useCtsOffload=%d (IbP2pDisableCts=%d) recvMatchingScheme=%d (%s)",
+       remMeta.isP2p, rComm->useCtsOffload, rcclParamIbCastP2pDisableCts(),
+       rComm->base.recvMatchingScheme,
+       rComm->base.recvMatchingScheme == BY_INDEX ? "BY_INDEX" :
+       rComm->base.recvMatchingScheme == BY_ID ? "BY_ID" : "BY_ORDER");
   rComm->base.nqps = IbCastCalculateNqps(remMeta.isP2p, rComm->base.vProps.ndevs,
                                          remMeta.ndevs, __func__);
   rComm->base.nDataQps = std::max(rComm->base.vProps.ndevs, remMeta.ndevs);
@@ -1555,6 +1581,7 @@ ib_recv:
 
   meta.ndevs = rComm->base.vProps.ndevs;
   meta.isP2p = remMeta.isP2p;
+  meta.recvMatchingScheme = rComm->base.recvMatchingScheme;
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
 
   stage->state = ncclIbCommStateSend;

@@ -101,6 +101,8 @@ struct ncclIbConnectionMetadata {
   int sl;
   int isP2p;
   bool isRMA;
+  // Negotiated recv matching scheme (BY_INDEX/BY_ID/BY_ORDER); set by connect initiator.
+  int recvMatchingScheme;
 };
 
 ncclResult_t IbCastQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* createQpAttrs);

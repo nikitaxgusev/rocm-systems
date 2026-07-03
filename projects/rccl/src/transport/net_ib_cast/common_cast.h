@@ -149,6 +149,9 @@ extern bool rcclCtsInlineData;
 extern bool IbCastOffloadEnabled;
 extern int64_t rcclParamIbCastP2pDisableCts();
 
+// Resolve recvMatchingScheme from env, CTS offload, and transport type.
+int IbCastResolveRecvMatchingScheme(bool useCtsOffload, bool isP2p);
+
 #define NCCL_IB_LLSTR(ll) (((ll) == IBV_LINK_LAYER_INFINIBAND) ? "IB" : (((ll) == IBV_LINK_LAYER_ETHERNET) ? "RoCE" : "UNSPECIFIED"))
 
 // Per-Dev connection metadata
