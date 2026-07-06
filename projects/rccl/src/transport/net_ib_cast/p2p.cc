@@ -19,6 +19,34 @@ int64_t IbCastArThreshold = 8192;
 // By default, use ncclIbRequestMatchingScheme::BY_INDEX matching scheme.
 NCCL_PARAM(IbCastReceiverSideMatchingScheme, "IB_RECEIVER_SIDE_MATCHING_SCHEME", -2);
 RCCL_PARAM(IbCastGdrFlushGpuMemNoRelaxedOrdering, "GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING", 1);
+RCCL_PARAM(IbDebugRxPosts, "IB_DEBUG_RXPOSTS", 0);
+RCCL_PARAM(IbDebugStale, "IB_DEBUG_STALE", 0);
+#define WR_IMM_DIAG_GEN_MASK 0x007fffffu
+
+static inline int IbCastCountLiveRecvReqs(struct ncclIbNetCommBase* base) {
+  int live = 0;
+  for (int i = 0; i < NET_IB_MAX_REQUESTS; i++) {
+    if (base->reqs[i].type == NCCL_NET_IB_REQ_RECV) live++;
+  }
+  return live;
+}
+
+static inline void IbCastRxPostDebug(struct ncclIbRecvComm* comm, int qpIndex, struct ncclIbRequest* req, int slot, const char* where) {
+  if (!rcclParamIbDebugRxPosts()) return;
+  static __thread int maxRxPosts = 0;
+  static __thread int maxLiveRecv = 0;
+  int rxPosts = comm->base.rxPosts[qpIndex];
+  int liveRecv = IbCastCountLiveRecvReqs(&comm->base);
+  bool newPeak = false;
+  if (rxPosts > maxRxPosts) { maxRxPosts = rxPosts; newPeak = true; }
+  if (liveRecv > maxLiveRecv) { maxLiveRecv = liveRecv; newPeak = true; }
+  if (newPeak || rxPosts >= NET_IB_MAX_REQUESTS) {
+    INFO(NCCL_NET, "NET/IB: RXPOST_PEAK [%s] comm=%p qp=%d rxPosts=%d/%d(peak=%d) liveRecv=%d/%d(peak=%d) fifoHead=%lu req_id=%ld slot=%d prepost=%d",
+         where, comm, qpIndex, rxPosts, NET_IB_MAX_REQUESTS, maxRxPosts, liveRecv, NET_IB_MAX_REQUESTS, maxLiveRecv,
+         (unsigned long)comm->base.fifoHead, req ? req->id : -1L, slot, comm->prepostReceiveWorkRequests);
+  }
+}
+
 
 const char* IbCastReqTypeStr[] = { "Unused", "Send", "Recv", "Flush", "IPut" };
 
@@ -152,6 +180,11 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
       immData = (rxReqIdx << WR_IMM_RX_REQ_IDX_SHIFT);
       if (nqps > 1) {
         immData |= WR_IMM_SPLIT_DATA_FLAG;
+      }
+      // [DIAG] observe-only: stamp receiver generation (slots[0].idx == fifoHead+1)
+      // into the otherwise-unused imm[22:0]. Matching still uses only imm[31:24].
+      if (rcclParamIbDebugStale()) {
+        immData |= ((uint32_t)slots[0].idx & WR_IMM_DIAG_GEN_MASK);
       }
     }
 
@@ -603,6 +636,7 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
       NCCLCHECK(IbCastCommBaseGetQpForRequest(&comm->base, req->id, i, &qp, &qpIndex));
       IbCastAddEvent(req, qp->devIndex);
       if (comm->prepostReceiveWorkRequests) {
+        IbCastRxPostDebug(comm, qpIndex, req, slot, "Irecv_prepost_skip");
         continue;
       }
       // Post receive work request on the QP
@@ -611,6 +645,14 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
           comm->ibRecvWorkRequest.wr_id = qpIndex;
           NCCLCHECK(IbCastPostRecvWorkRequest(qp->qp, &comm->ibRecvWorkRequest));
           comm->base.rxPosts[qpIndex]++;
+          if (comm->base.rxPosts[qpIndex] > NCCL_NET_MAX_REQUESTS) {
+            WARN("NET/IB: [ASSERT] rxPosts[%d]=%d EXCEEDED plugin FIFO depth %d (NCCL_NET_MAX_REQUESTS, comm=%p qp_num=%u)",
+                 qpIndex, comm->base.rxPosts[qpIndex], NCCL_NET_MAX_REQUESTS, comm, qp->qp->qp_num);
+            assert(comm->base.rxPosts[qpIndex] <= NCCL_NET_MAX_REQUESTS);
+          }
+          IbCastRxPostDebug(comm, qpIndex, req, slot, "Irecv_post");
+        } else {
+          IbCastRxPostDebug(comm, qpIndex, req, slot, "Irecv_cap");
         }
       } else {
         comm->ibRecvWorkRequest.wr_id = req - comm->base.reqs;
@@ -986,6 +1028,20 @@ static inline ncclResult_t IbCastCompletionEventProcess(struct ncclIbNetCommBase
       }
       TRACE(NCCL_NET, "NET/IB: %s: Got completion for a recv request (req=%p, comm=%p, id=%ld, devIndex=%d, qp_num=%u)", __func__, req, req->base, req->id, devIndex, wc->qp_num);
       struct ncclIbRecvComm* recvComm = (struct ncclIbRecvComm*)commBase;
+      if (commBase->recvMatchingScheme == BY_INDEX && rcclParamIbDebugStale()) {
+        uint32_t imm = be32toh(wc->imm_data);
+        uint32_t immGen = imm & WR_IMM_DIAG_GEN_MASK;
+        uint32_t curGen = (uint32_t)(req->id + 1) & WR_IMM_DIAG_GEN_MASK;
+        uint32_t poolIdx = (imm >> WR_IMM_RX_REQ_IDX_SHIFT) & WR_IMM_RX_REQ_IDX_MASK;
+        int qpIdx = (int)wc->wr_id;
+        int rxp = (qpIdx >= 0 && qpIdx < NCCL_IB_MAX_QPS * NCCL_NET_IB_MAX_RECVS) ? commBase->rxPosts[qpIdx] : -1;
+        if (immGen != 0 && immGen != curGen) {
+          WARN("NET/IB: [STALE-BY-INDEX] MISDELIVERED: completion for pool_idx=%u carried gen=%u, but reqs[pool_idx] now holds id=%ld (gen=%u) -> matched WRONG generation (pool slot recycled). fifoHead%%256=%ld rxPosts[qp=%d]=%d (core_fifo=%d plugin_cap=%d => NO QUEUE OVERFLOW) fifoHead=%lu qp_num=%u",
+               poolIdx, immGen, (long)req->id, curGen, (long)(req->id % NET_IB_MAX_REQUESTS),
+               qpIdx, rxp, NCCL_NET_MAX_REQUESTS, NET_IB_MAX_REQUESTS,
+               (unsigned long)commBase->fifoHead, wc->qp_num);
+        }
+      }
 
       if (recvComm->prepostReceiveWorkRequests) {
         // Post another receive work request on the QP
