@@ -143,6 +143,35 @@ extern bool IbCastUseInline;
 #define WR_IMM_RX_REQ_IDX_SHIFT 24
 #define WR_IMM_SPLIT_DATA_FLAG  0x00800000
 #define WR_IMM_SIZE_MASK        0x007fffff
+
+// CTS-fifo consistency invariant (BY_INDEX matching).
+//
+// The sender gates on the readiness word (ncclIbSendFifo::idx == fifoHead+1),
+// then must read the matching receiver request-slot index (rxReqIndex) to echo
+// it in the RDMA-Write-with-IMM that routes the receiver's completion. Both
+// values come from a fifo slot the receiver recycles every NET_IB_MAX_REQUESTS
+// posts through a single RDMA WRITE of the whole element.
+//
+// The reference net_ib fifo element is 64 bytes (one cache line) and carries no
+// rxReqIndex, so idx and every field the sender consumes live in the SAME cache
+// line and become visible together; a volatile gate + seq_cst fence is enough.
+// Adding a *separate* rxReqIndex field grows the element past one cache line and
+// places idx and rxReqIndex in DIFFERENT cache lines. PCIe/RDMA gives no
+// cross-cache-line visibility-ordering or atomicity guarantee to a CPU polling
+// the target memory, so on a recycled slot the sender can observe a fresh idx
+// paired with the PREVIOUS occupant's rxReqIndex. This is independent of field
+// order: placing idx last does NOT help (verified experimentally - it still
+// hangs). The stale index misroutes the completion to the wrong recv request
+// and the transfer deadlocks.
+//
+// Fix: pack the generation (fifoHead+1, high bits) and rxReqIndex (low 16 bits)
+// into the single naturally-aligned 8-byte idx word. An 8-byte aligned write is
+// placed atomically, so a fresh generation always carries its matching
+// rxReqIndex. This keeps the element at 64 bytes (identical to the reference
+// element) and makes the idx word the single sender-consumed consistency unit.
+// rxReqIndex is <= NET_IB_MAX_REQUESTS-1 (255) so 16 bits is ample headroom.
+#define CTS_IDX_GEN_SHIFT       16
+#define CTS_IDX_RXREQ_MASK      0xffffull
 extern int IbCastGdrFlushDisable;
 extern bool IbCastAinicRoce;
 extern bool rcclCtsInlineData;
@@ -356,9 +385,11 @@ struct alignas(64) ncclIbSendFifo {
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
   uint32_t nreqs;
   uint32_t tag;
+  // Readiness word polled by the sender. High bits carry the fifo generation
+  // (fifoHead+1), low 16 bits carry rxReqIndex - see CTS_IDX_* above. Keeping
+  // the element at 64 bytes (one cache line, no separate rxReqIndex field) is
+  // what makes the sender's read of {generation, rxReqIndex} consistent.
   uint64_t idx;
-  uint16_t rxReqIndex;
-  char padding[14];
 };
 
 #define MAX_INLINE_DATA_SIZE 24

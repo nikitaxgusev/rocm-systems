@@ -148,7 +148,9 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
     if (comm->base.recvMatchingScheme != BY_INDEX) {
       immData = (uint32_t)(reqs[0]->id % UINT32_MAX);
     } else {
-      uint32_t rxReqIdx = (uint32_t)slots[0].rxReqIndex;
+      // Read rxReqIndex from the packed readiness word so it is consistent with
+      // the generation the sender just gated on (avoids torn CTS-fifo reads).
+      uint32_t rxReqIdx = (uint32_t)(slots[0].idx & CTS_IDX_RXREQ_MASK);
       immData = (rxReqIdx << WR_IMM_RX_REQ_IDX_SHIFT);
       if (nqps > 1) {
         immData |= WR_IMM_SPLIT_DATA_FLAG;
@@ -372,10 +374,11 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
   if (!comm->useCtsOffload) {
     slots = comm->ctsFifo[slot];
     uint64_t idx = comm->base.fifoHead+1;
-    if (slots[0].idx != idx) { *request = NULL; return ncclSuccess; }
+    // idx packs the generation in the high bits (see CTS_IDX_* in common_cast.h).
+    if ((slots[0].idx >> CTS_IDX_GEN_SHIFT) != idx) { *request = NULL; return ncclSuccess; }
     nreqs = slots[0].nreqs;
     // Wait until all data has arrived
-    for (int r=1; r<nreqs; r++) while(slots[r].idx != idx);
+    for (int r=1; r<nreqs; r++) while((slots[r].idx >> CTS_IDX_GEN_SHIFT) != idx);
     std::atomic_thread_fence(std::memory_order_seq_cst); // order the nreqsPtr load against tag/rkey/addr loads below
   }
 
@@ -655,8 +658,11 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
       localElem[i].nreqs = n;
       localElem[i].size = sizes[i]; // Sanity/Debugging
       localElem[i].tag = tags[i];
-      localElem[i].idx = comm->base.fifoHead+1;
-      localElem[i].rxReqIndex = rxReqIndex;
+      // Publish the readiness word last, packing the generation (fifoHead+1)
+      // and rxReqIndex into the single 8-byte field so the sender reads them
+      // atomically as one PCIe write (see CTS_IDX_* in common_cast.h).
+      localElem[i].idx = (((uint64_t)(comm->base.fifoHead+1)) << CTS_IDX_GEN_SHIFT)
+                       | ((uint64_t)rxReqIndex & CTS_IDX_RXREQ_MASK);
     }
   }
 
