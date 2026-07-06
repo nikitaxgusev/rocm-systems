@@ -605,6 +605,25 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
 
   NCCLCHECK(IbCastGetRequest(&comm->base, &req));
   rxReqIndex = (uint16_t) (req - comm->base.reqs);
+  if (rcclParamIbDebugStale()) {
+    // req->id still holds the PREVIOUS occupant's id (FreeRequest doesn't clear it).
+    int64_t prevId = (int64_t)req->id;
+    int64_t newId  = (int64_t)comm->base.fifoHead;
+    int64_t dist   = newId - prevId; // #Irecv between two uses of this pool slot
+    static __thread uint64_t nSamp = 0, bkt[7] = {0}, minD = ~0ull, maxD = 0, sumD = 0;
+    if (prevId > 0 && dist > 0) {
+      nSamp++; sumD += (uint64_t)dist;
+      if ((uint64_t)dist < minD) minD = (uint64_t)dist;
+      if ((uint64_t)dist > maxD) maxD = (uint64_t)dist;
+      int b = dist<=8?0:dist<=16?1:dist<=32?2:dist<=64?3:dist<=128?4:dist<=256?5:6;
+      bkt[b]++;
+      if ((nSamp % 512) == 0) {
+        INFO(NCCL_NET, "NET/IB: [POOL-REUSE] samples=%lu min=%lu max=%lu avg=%lu | dist<=8:%lu <=16:%lu <=32:%lu <=64:%lu <=128:%lu <=256:%lu >256:%lu (pool_capacity=%d, so reuse is ~%lux faster than capacity)",
+             nSamp, minD, maxD, sumD/nSamp, bkt[0],bkt[1],bkt[2],bkt[3],bkt[4],bkt[5],bkt[6], NET_IB_MAX_REQUESTS,
+             (sumD/nSamp) ? (uint64_t)(NET_IB_MAX_REQUESTS/(sumD/nSamp)) : 0ul);
+      }
+    }
+  }
   req->id = comm->base.fifoHead;
   req->type = NCCL_NET_IB_REQ_RECV;
   req->sock = &comm->base.sock;
