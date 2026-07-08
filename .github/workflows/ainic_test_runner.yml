@@ -69,6 +69,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Probe runner environment (paths discovery)
+        if: always()
+        run: |
+          echo "== whoami / host =="; whoami; hostname
+          echo "== ROCm on PATH =="
+          for b in rocminfo hipcc amdclang++ rocm_agent_enumerator; do
+            echo -n "$b -> "; command -v "$b" || echo "(not found)"
+          done
+          echo "== /opt/rocm* =="; ls -ld /opt/rocm* 2>/dev/null || echo "(none)"
+          echo "== other rocm roots =="; ls -ld /cluster/*rocm* /it-share/*rocm* 2>/dev/null || echo "(none)"
+          echo "== ROCm-related env =="; env | grep -iE 'rocm|hip' || echo "(none)"
+          echo "== module command =="; command -v module && (module avail 2>&1 | head -40) || echo "(no module)"
+          echo "== /it-share/rccl-ci listing =="; ls -la /it-share/rccl-ci 2>/dev/null || echo "(missing)"
+          echo "== librccl.so anywhere under /it-share/rccl-ci =="
+          find /it-share/rccl-ci -maxdepth 3 -name 'librccl.so*' 2>/dev/null || echo "(none found)"
+          echo "== MPI =="; ls -ld /it-share/ompi* 2>/dev/null; command -v mpirun || echo "(mpirun not on PATH)"
+
       - name: Run AINIC test suite
         id: run_tests
         continue-on-error: true
