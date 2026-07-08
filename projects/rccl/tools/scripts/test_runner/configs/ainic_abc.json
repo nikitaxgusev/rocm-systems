@@ -229,6 +229,16 @@
       ]
     },
 
+    "b_alltoall_full": {
+      "extends": "b_base",
+      "command_args": "-b 1K -e 16G -f 2 -g 1",
+      "_comment": "Full-range alltoall on plain RoCE (IB), 1K..16G.",
+      "env_variables": { "NCCL_NET": "IB" },
+      "tests": [
+        { "name": "B_alltoall_IB_1K_16G", "binary": "alltoall_perf", "description": "Plain RoCE alltoall full range 1K..16G." }
+      ]
+    },
+
     "b2_cast_wrr_ctsoff": {
       "extends": "b_base",
       "_comment": "B2: explicit CAST, WRR ON, CTS OFF.",
@@ -381,6 +391,7 @@
     { "name": "A. Component - GIN proxy",            "config": "a_gin",             "enabled": true },
 
     { "name": "B1. IB baseline",                     "config": "b1_ib",             "enabled": true },
+    { "name": "B1f. IB alltoall full (1K-16G)",       "config": "b_alltoall_full",   "enabled": true },
     { "name": "B2. CAST WRR / CTS off",              "config": "b2_cast_wrr_ctsoff","enabled": true },
     { "name": "B3. CAST no-WRR / CTS off",           "config": "b3_cast_nowrr_ctsoff","enabled": true },
     { "name": "B4. ROCM-IB / CTS off",               "config": "b4_rocmib_ctsoff",  "enabled": true },
