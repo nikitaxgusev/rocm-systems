@@ -11,7 +11,7 @@
   },
   "auto_detect_hosts": true,
   "mpi_args": {
-    "ainic": "--mca oob_tcp_if_include eno0 --mca btl_tcp_if_include eno0 --mca btl ^vader,openib --bind-to none"
+    "ainic": "--mca oob_tcp_if_include eno0 --mca btl_tcp_if_include eno0 --mca btl ^vader,openib --bind-to none --oversubscribe"
   },
   "env_variables": {
     "NCCL_DEBUG": "INFO",

@@ -1324,9 +1324,20 @@ class TestExecutor:
             os.close(fd)
             cmd += f" --gtest_output=json:{shlex.quote(gtest_json_path)}"
 
+        # Working directory: gtest binaries live in <build_dir>/test, but a
+        # prebuilt/custom lib dir (RCCL_BUILD_DIR / test_binary_dir) may have no
+        # "test" subdir. cwd only needs to exist (perf binaries are invoked by
+        # absolute path), so fall back gracefully to keep prebuilt runs working.
+        run_cwd = os.path.join(self.build_dir, "test")
+        if not os.path.isdir(run_cwd):
+            if os.path.isdir(self.build_dir):
+                run_cwd = self.build_dir
+            else:
+                run_cwd = os.path.dirname(test_binary_path) or os.getcwd()
+
         if self.args.verbose:
             print(f"\n  Command: {cmd}")
-            print(f"  Working directory: {os.path.join(self.build_dir, 'test')}")
+            print(f"  Working directory: {run_cwd}")
             print(f"  LD_LIBRARY_PATH: {env.get('LD_LIBRARY_PATH', '')}")
             print(f"  LLVM_PROFILE_FILE: {env.get('LLVM_PROFILE_FILE', 'Not set')}\n")
 
@@ -1343,7 +1354,7 @@ class TestExecutor:
         proc = subprocess.Popen(
             cmd,
             shell=True,
-            cwd=os.path.join(self.build_dir, "test"),
+            cwd=run_cwd,
             env=env,
             start_new_session=True,
         )
