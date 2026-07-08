@@ -39,6 +39,22 @@ on:
         description: 'Comma-separated suite names to run (empty = all enabled)'
         required: false
         default: ''
+      salloc_partition:
+        description: 'SLURM partition to allocate GPU nodes from'
+        required: false
+        default: 'amd-tw'
+      salloc_reservation:
+        description: 'SLURM reservation holding the AINIC GPU nodes'
+        required: false
+        default: 'rccl_dev'
+      salloc_nodes:
+        description: 'Number of GPU nodes to allocate'
+        required: false
+        default: '2'
+      salloc_time:
+        description: 'Max wall clock for the SLURM allocation (HH:MM:SS)'
+        required: false
+        default: '04:00:00'
   push:
     branches:
       - users/nikitaxgusev/ainic-test-runner
@@ -66,6 +82,13 @@ env:
   DEFAULT_RCCL_BUILD_DIR: /it-share/rccl-ci/builds/reference/lib
   # Prebuilt rccl-tests perf binaries (all_reduce_perf, alltoall_perf, ...).
   DEFAULT_RCCL_TESTS_BIN: /it-share/rccl-ci/rccl-tests-2.30.4/bin
+  # SLURM allocation defaults (used when the push trigger fires; workflow_dispatch
+  # inputs override these). The self-hosted runner is a submit node without local
+  # GPUs, so the suite must run inside a SLURM allocation on the AINIC GPU nodes.
+  DEFAULT_SALLOC_PARTITION: amd-tw
+  DEFAULT_SALLOC_RESERVATION: rccl_dev
+  DEFAULT_SALLOC_NODES: '2'
+  DEFAULT_SALLOC_TIME: '04:00:00'
 
 jobs:
   ainic-test-runner:
@@ -103,23 +126,49 @@ jobs:
           RCCL_BUILD_DIR: ${{ github.event.inputs.rccl_build_dir || env.DEFAULT_RCCL_BUILD_DIR }}
           RCCL_TESTS_BIN: ${{ env.DEFAULT_RCCL_TESTS_BIN }}
           TEST_SUITES: ${{ github.event.inputs.test_suites || '' }}
+          SALLOC_PARTITION: ${{ github.event.inputs.salloc_partition || env.DEFAULT_SALLOC_PARTITION }}
+          SALLOC_RESERVATION: ${{ github.event.inputs.salloc_reservation || env.DEFAULT_SALLOC_RESERVATION }}
+          SALLOC_NODES: ${{ github.event.inputs.salloc_nodes || env.DEFAULT_SALLOC_NODES }}
+          SALLOC_TIME: ${{ github.event.inputs.salloc_time || env.DEFAULT_SALLOC_TIME }}
         run: |
           set -o pipefail
           # --suite-name takes a gtest-style glob ( ':' = OR ), so convert the
-          # comma-separated input into that form.
-          SUITE_ARGS=()
+          # comma-separated input into that form. Exported so the shell spawned
+          # inside the SLURM allocation picks it up.
+          export SUITE_NAME_ARG=""
           if [ -n "${TEST_SUITES}" ]; then
-            SUITE_ARGS=(--suite-name "$(printf '%s' "${TEST_SUITES}" | tr ',' ':')")
+            SUITE_NAME_ARG="--suite-name $(printf '%s' "${TEST_SUITES}" | tr ',' ':')"
           fi
-          # test_runner.py resolves `from lib...` relative to its own directory
-          # and the README runs it from there, so cd in first and use a config
-          # path relative to that directory.
-          cd "${GITHUB_WORKSPACE}/${TEST_RUNNER_DIR}"
-          python3 test_runner.py \
-            --config configs/ainic_abc.json \
-            --system ainic \
-            "${SUITE_ARGS[@]}" \
-            2>&1 | tee "${RUNNER_TEMP}/ainic_run.log"
+
+          # The self-hosted runner is a SLURM submit node without local GPUs, so
+          # the suite must execute inside an allocation on the AINIC GPU nodes.
+          # Inside the allocation SLURM_JOB_ID is set, test_runner calls
+          # `scontrol show hostnames`, and mpirun lands 8 ranks/node on real GPUs.
+          # --exclusive gives full CPUs per node so `--bind-to numa` has room.
+          # test_runner.py resolves `from lib...` relative to its own directory,
+          # so cd in first and use a config path relative to that directory.
+          RESV_ARG=""
+          if [ -n "${SALLOC_RESERVATION}" ]; then
+            RESV_ARG="--reservation=${SALLOC_RESERVATION}"
+          fi
+
+          salloc \
+            --partition="${SALLOC_PARTITION}" \
+            ${RESV_ARG} \
+            --nodes="${SALLOC_NODES}" \
+            --ntasks-per-node=8 \
+            --gres=gpu:8 \
+            --exclusive \
+            --time="${SALLOC_TIME}" \
+            bash -c '
+              set -o pipefail
+              cd "${GITHUB_WORKSPACE}/${TEST_RUNNER_DIR}"
+              python3 test_runner.py \
+                --config configs/ainic_abc.json \
+                --system ainic \
+                ${SUITE_NAME_ARG} \
+                2>&1 | tee "${RUNNER_TEMP}/ainic_run.log"
+            '
 
       - name: Upload run log and reports
         if: always()

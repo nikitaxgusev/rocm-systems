@@ -11,7 +11,7 @@
   },
   "auto_detect_hosts": true,
   "mpi_args": {
-    "ainic": "--mca oob_tcp_if_include eno0 --mca btl_tcp_if_include eno0 --mca btl ^vader,openib --bind-to none --oversubscribe"
+    "ainic": "--bind-to numa --mca pml ob1 --mca osc ^ucx --mca btl tcp,self --mca btl_tcp_if_include eno0"
   },
   "env_variables": {
     "NCCL_DEBUG": "INFO",
@@ -229,13 +229,27 @@
       ]
     },
 
-    "b_alltoall_full": {
-      "extends": "b_base",
-      "command_args": "-b 1K -e 16G -f 2 -g 1",
-      "_comment": "Full-range alltoall on plain RoCE (IB), 1K..16G.",
-      "env_variables": { "NCCL_NET": "IB" },
+    "b_alltoall_cast_full": {
+      "is_gtest": false,
+      "num_ranks": 16,
+      "num_nodes": 2,
+      "num_gpus": 8,
+      "timeout": 3600,
+      "command_args": "-b 1024 -e 16G -f 2 -g 1 -n 20 -c 1 -w 2",
+      "_comment": "Full-range CAST alltoall (1K..16G): single-QP, WRR off, CTS offload off, GDR flush off.",
+      "env_variables": {
+        "NCCL_NET": "IB-CAST",
+        "NCCL_IB_QPS_PER_CONNECTION": "1",
+        "RCCL_IB_QPS_PER_P2P": "1",
+        "RCCL_IB_QP_SCHED_ENABLE": "0",
+        "NCCL_IB_PCI_RELAXED_ORDERING": "1",
+        "RCCL_CTS_OFFLOAD_ENABLED": "0",
+        "NCCL_NET_OPTIONAL_RECV_COMPLETION": "1",
+        "NCCL_GDR_FLUSH_DISABLE": "1",
+        "NCCL_DEBUG": "WARN"
+      },
       "tests": [
-        { "name": "B_alltoall_IB_1K_16G", "binary": "alltoall_perf", "description": "Plain RoCE alltoall full range 1K..16G." }
+        { "name": "B_alltoall_CAST_1K_16G", "binary": "alltoall_perf", "description": "CAST alltoall full range 1K..16G (single-QP, CTS offload off)." }
       ]
     },
 
@@ -391,7 +405,7 @@
     { "name": "A. Component - GIN proxy",            "config": "a_gin",             "enabled": true },
 
     { "name": "B1. IB baseline",                     "config": "b1_ib",             "enabled": true },
-    { "name": "B1f. IB alltoall full (1K-16G)",       "config": "b_alltoall_full",   "enabled": true },
+    { "name": "B1f. CAST alltoall full (1K-16G)",     "config": "b_alltoall_cast_full", "enabled": true },
     { "name": "B2. CAST WRR / CTS off",              "config": "b2_cast_wrr_ctsoff","enabled": true },
     { "name": "B3. CAST no-WRR / CTS off",           "config": "b3_cast_nowrr_ctsoff","enabled": true },
     { "name": "B4. ROCM-IB / CTS off",               "config": "b4_rocmib_ctsoff",  "enabled": true },
