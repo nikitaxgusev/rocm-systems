@@ -5,9 +5,9 @@
   },
   "paths": {
     "workdir": "${WORKDIR:-$PWD}",
-    "rocm_path": "${ROCM_PATH:-/opt/rocm}",
-    "mpi_path": "${MPI_PATH}",
-    "test_binary_dir": "${RCCL_TESTS_DIR:-$WORKDIR/rccl-tests}/build"
+    "rocm_path": "${ROCM_PATH:-/it-share/rccl-ci/rocm_devel}",
+    "mpi_path": "${MPI_PATH:-/it-share/ompi-5.0.8}",
+    "test_binary_dir": "${RCCL_TESTS_BIN:-/it-share/rccl-ci/rccl-tests-2.30.4/bin}"
   },
   "auto_detect_hosts": true,
   "mpi_args": {
@@ -30,7 +30,7 @@
     "parallel_jobs": 64
   },
   "rccl_tests_build_configuration": {
-    "enabled": true,
+    "enabled": false,
     "source_dir": "${RCCL_TESTS_DIR:-$WORKDIR/rccl-tests}",
     "install_script": "install.sh",
     "install_flags": ["--mpi"]
