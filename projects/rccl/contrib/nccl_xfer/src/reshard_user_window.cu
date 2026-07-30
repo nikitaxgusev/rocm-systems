@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -32,7 +33,7 @@
 #include <cstring>
 #include <vector>
 
-#include "cuda_runtime.h"
+#include "hip/hip_runtime.h"
 #include "nccl.h"
 #include "nccl_device.h"
 
@@ -74,7 +75,7 @@ __global__ void uwTranspose2DInnerKernel(const char* __restrict__ in, char* __re
   }
 }
 
-static void uwLaunchTranspose2DInner(const void* in, void* out, size_t D0, size_t D1, size_t D2, cudaStream_t stream) {
+static void uwLaunchTranspose2DInner(const void* in, void* out, size_t D0, size_t D1, size_t D2, hipStream_t stream) {
   size_t total = D0 * D1 * D2;
   int blockSize = 256;
   size_t needed = (total + blockSize - 1) / blockSize;
@@ -444,7 +445,7 @@ directReshardKernelUserWindow(
 // ============================================================================
 
 ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, const ncclXferDistTensor_t* src,
-                                       const ncclXferDistTensor_t* dst, cudaStream_t stream) {
+                                       const ncclXferDistTensor_t* dst, hipStream_t stream) {
   /* Required handles. */
   if (comm == nullptr || window == nullptr) {
     fprintf(stderr, "[ncclXferReshardWithWindow] comm and window must both be "
@@ -527,20 +528,20 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
 
   // Match the comm's CUDA device.
   int currentCudaDev;
-  UW_CUDACHECK(cudaGetDevice(&currentCudaDev));
+  UW_CUDACHECK(hipGetDevice(&currentCudaDev));
   ncclCommProperties commProps = NCCL_COMM_PROPERTIES_INITIALIZER;
   ncclResult_t propsResult = ncclCommQueryProperties(comm, &commProps);
-  if (propsResult == ncclSuccess && currentCudaDev != commProps.cudaDev) UW_CUDACHECK(cudaSetDevice(commProps.cudaDev));
+  if (propsResult == ncclSuccess && currentCudaDev != commProps.cudaDev) UW_CUDACHECK(hipSetDevice(commProps.cudaDev));
 
   // Default-stream callers run on a library-owned non-blocking
   // stream from the pool; back-edge below makes subsequent default-
   // stream work observe our completion.  See nccl_xfer.h for the
   // full contract.  NCCLXFER_RESHARD_STREAM_POOL_SIZE=0 disables this
   // (forces legacy synchronizing-default-stream behavior).
-  const bool isDefaultStream = (stream == nullptr || stream == cudaStreamLegacy || stream == cudaStreamPerThread);
+  const bool isDefaultStream = (stream == nullptr || stream == hipStreamLegacy || stream == hipStreamPerThread);
   const bool wantPool = isDefaultStream && reshardGetStreamPoolSize() > 0;
-  cudaStream_t workStream = stream;
-  cudaEvent_t poolEvent = nullptr;
+  hipStream_t workStream = stream;
+  hipEvent_t poolEvent = nullptr;
   if (wantPool) {
     const int dev = (propsResult == ncclSuccess) ? commProps.cudaDev : currentCudaDev;
     UW_NCCLCHECK(streamPoolAcquire(comm, dev, &workStream, &poolEvent));
@@ -800,12 +801,12 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
     UW_NCCLCHECK(ensureTransposeBuffer(comm, myLocalSize, workStream));
 
     {
-      cudaError_t err = cudaGetLastError();
-      if (err != cudaSuccess) {
+      hipError_t err = hipGetLastError();
+      if (err != hipSuccess) {
         fprintf(stderr,
                 "[nccl-reshard][Rank %d] CUDA error after "
                 "ensureTransposeBuffer: %s\n",
-                worldRank, cudaGetErrorString(err));
+                worldRank, hipGetErrorString(err));
         return ncclSystemError;
       }
       RESHARD_DEBUG(worldRank, "ensureTransposeBuffer: size=%zu, buf=%p", myLocalSize, getTransposeBuffer(comm));
@@ -821,12 +822,12 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
       }
 
       {
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
+        hipError_t err = hipGetLastError();
+        if (err != hipSuccess) {
           fprintf(stderr,
                   "[nccl-reshard][Rank %d] CUDA error after "
                   "transpose pack: %s\n",
-                  worldRank, cudaGetErrorString(err));
+                  worldRank, hipGetErrorString(err));
           return ncclSystemError;
         }
         RESHARD_DEBUG(worldRank, "transpose pack: ndims=%d, D0=%zu, D1=%zu, D2=%zu", ndims, srcDimsBytes[0],
@@ -855,12 +856,12 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
     }
 
     {
-      cudaError_t err = cudaGetLastError();
-      if (err != cudaSuccess) {
+      hipError_t err = hipGetLastError();
+      if (err != hipSuccess) {
         fprintf(stderr,
                 "[nccl-reshard][Rank %d] CUDA error after "
                 "window register: %s\n",
-                worldRank, cudaGetErrorString(err));
+                worldRank, hipGetErrorString(err));
         return ncclSystemError;
       }
       RESHARD_DEBUG(worldRank, "window register: buf=%p, cap=%zu, effWindow=%p", getTransposeBuffer(comm),
@@ -878,9 +879,9 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
   int threadsPerCta = DEFAULT_KERNEL_MAX_NTHREADS;
 
   {
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-      fprintf(stderr, "[nccl-reshard][Rank %d] CUDA error pre-launch: %s\n", worldRank, cudaGetErrorString(err));
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr, "[nccl-reshard][Rank %d] CUDA error pre-launch: %s\n", worldRank, hipGetErrorString(err));
       return ncclSystemError;
     }
     RESHARD_DEBUG(worldRank,
@@ -923,12 +924,12 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
     reshardKernelUserWindow<<<numCtas, threadsPerCta, 0, workStream>>>(ringParams, *devCommPtr);
   }
 
-  cudaError_t launchErr = cudaGetLastError();
-  if (launchErr != cudaSuccess) {
+  hipError_t launchErr = hipGetLastError();
+  if (launchErr != hipSuccess) {
     fprintf(stderr,
             "[nccl-reshard][Rank %d] kernel launch failed: %s "
             "[algo=%s, numCtas=%d]\n",
-            worldRank, cudaGetErrorString(launchErr), algo == RESHARD_ALGO_RING ? "RING" : "DIRECT", numCtas);
+            worldRank, hipGetErrorString(launchErr), algo == RESHARD_ALGO_RING ? "RING" : "DIRECT", numCtas);
     return ncclSystemError;
   }
 
@@ -952,8 +953,8 @@ ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, con
   // event is pool-owned and reused across calls.  Skipped when the
   // pool was full and we fell through to the caller's stream.
   if (acquiredPoolSlot) {
-    UW_CUDACHECK(cudaEventRecord(poolEvent, workStream));
-    UW_CUDACHECK(cudaStreamWaitEvent(stream, poolEvent, 0));
+    UW_CUDACHECK(hipEventRecord(poolEvent, workStream));
+    UW_CUDACHECK(hipStreamWaitEvent(stream, poolEvent, 0));
   }
 
   return ncclSuccess;

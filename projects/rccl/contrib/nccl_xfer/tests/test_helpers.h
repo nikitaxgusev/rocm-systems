@@ -23,7 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <nccl.h>
 
 /* ======================================================================
@@ -51,9 +51,9 @@ static inline void testUnsetEnv(const char* name) {
 
 #define TEST_CUDACHECK(cmd)                                                                 \
   do {                                                                                      \
-    cudaError_t e = (cmd);                                                                  \
-    if (e != cudaSuccess) {                                                                 \
-      fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
+    hipError_t e = (cmd);                                                                  \
+    if (e != hipSuccess) {                                                                 \
+      fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__, hipGetErrorString(e)); \
       abort();                                                                              \
     }                                                                                       \
   } while (0)
@@ -85,10 +85,10 @@ void testInitSourceData(char* buffer, const size_t localByteDims[3], int ndims,
                         int shardDim, /* tensor dim that is sharded; -1 if replicated */
                         int shardIdx, /* this rank's shard index along shardDim */
                         int shardCount, /* number of shards along shardDim */
-                        cudaStream_t stream);
+                        hipStream_t stream);
 
 bool testValidateDestData(const char* buffer, const size_t localByteDims[3], int ndims, int shardDim, int shardIdx,
-                          int shardCount, int worldRank, cudaStream_t stream,
+                          int shardCount, int worldRank, hipStream_t stream,
                           unsigned long long* outErrorCount = nullptr);
 
 #endif /* TESTS_TEST_HELPERS_H_ */

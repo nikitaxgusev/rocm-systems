@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -78,7 +79,7 @@ static __global__ void testValidateDestDataKernel(
  * ====================================================================*/
 
 void testInitSourceData(char* buffer, const size_t localByteDims[3], int ndims, int shardDim, int shardIdx,
-                        int shardCount, cudaStream_t stream) {
+                        int shardCount, hipStream_t stream) {
   size_t globalStart[3] = {0, 0, 0};
   size_t globalDims[3] = {localByteDims[0], localByteDims[1], ndims == 3 ? localByteDims[2] : 1};
 
@@ -99,7 +100,7 @@ void testInitSourceData(char* buffer, const size_t localByteDims[3], int ndims, 
 }
 
 bool testValidateDestData(const char* buffer, const size_t localByteDims[3], int ndims, int shardDim, int shardIdx,
-                          int shardCount, int worldRank, cudaStream_t stream, unsigned long long* outErrorCount) {
+                          int shardCount, int worldRank, hipStream_t stream, unsigned long long* outErrorCount) {
   size_t globalStart[3] = {0, 0, 0};
   size_t globalDims[3] = {localByteDims[0], localByteDims[1], ndims == 3 ? localByteDims[2] : 1};
 
@@ -113,11 +114,11 @@ bool testValidateDestData(const char* buffer, const size_t localByteDims[3], int
   char* dFirstExp = nullptr;
   char* dFirstAct = nullptr;
 
-  TEST_CUDACHECK(cudaMalloc(&dErrorCount, sizeof(unsigned long long)));
-  TEST_CUDACHECK(cudaMalloc(&dFirstIdx, sizeof(size_t)));
-  TEST_CUDACHECK(cudaMalloc(&dFirstExp, sizeof(char)));
-  TEST_CUDACHECK(cudaMalloc(&dFirstAct, sizeof(char)));
-  TEST_CUDACHECK(cudaMemset(dErrorCount, 0, sizeof(unsigned long long)));
+  TEST_CUDACHECK(hipMalloc(&dErrorCount, sizeof(unsigned long long)));
+  TEST_CUDACHECK(hipMalloc(&dFirstIdx, sizeof(size_t)));
+  TEST_CUDACHECK(hipMalloc(&dFirstExp, sizeof(char)));
+  TEST_CUDACHECK(hipMalloc(&dFirstAct, sizeof(char)));
+  TEST_CUDACHECK(hipMemset(dErrorCount, 0, sizeof(unsigned long long)));
 
   int blockSize = 256;
   size_t total = localByteDims[0] * localByteDims[1] * (ndims == 3 ? localByteDims[2] : 1);
@@ -135,17 +136,17 @@ bool testValidateDestData(const char* buffer, const size_t localByteDims[3], int
   char hFirstExp = 0;
   char hFirstAct = 0;
 
-  TEST_CUDACHECK(cudaMemcpyAsync(&hErrorCount, dErrorCount, sizeof(unsigned long long), cudaMemcpyDeviceToHost,
+  TEST_CUDACHECK(hipMemcpyAsync(&hErrorCount, dErrorCount, sizeof(unsigned long long), hipMemcpyDeviceToHost,
                                  stream));
-  TEST_CUDACHECK(cudaMemcpyAsync(&hFirstIdx, dFirstIdx, sizeof(size_t), cudaMemcpyDeviceToHost, stream));
-  TEST_CUDACHECK(cudaMemcpyAsync(&hFirstExp, dFirstExp, sizeof(char), cudaMemcpyDeviceToHost, stream));
-  TEST_CUDACHECK(cudaMemcpyAsync(&hFirstAct, dFirstAct, sizeof(char), cudaMemcpyDeviceToHost, stream));
-  TEST_CUDACHECK(cudaStreamSynchronize(stream));
+  TEST_CUDACHECK(hipMemcpyAsync(&hFirstIdx, dFirstIdx, sizeof(size_t), hipMemcpyDeviceToHost, stream));
+  TEST_CUDACHECK(hipMemcpyAsync(&hFirstExp, dFirstExp, sizeof(char), hipMemcpyDeviceToHost, stream));
+  TEST_CUDACHECK(hipMemcpyAsync(&hFirstAct, dFirstAct, sizeof(char), hipMemcpyDeviceToHost, stream));
+  TEST_CUDACHECK(hipStreamSynchronize(stream));
 
-  TEST_CUDACHECK(cudaFree(dErrorCount));
-  TEST_CUDACHECK(cudaFree(dFirstIdx));
-  TEST_CUDACHECK(cudaFree(dFirstExp));
-  TEST_CUDACHECK(cudaFree(dFirstAct));
+  TEST_CUDACHECK(hipFree(dErrorCount));
+  TEST_CUDACHECK(hipFree(dFirstIdx));
+  TEST_CUDACHECK(hipFree(dFirstExp));
+  TEST_CUDACHECK(hipFree(dFirstAct));
 
   if (outErrorCount) *outErrorCount = hErrorCount;
 

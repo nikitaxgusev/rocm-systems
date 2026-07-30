@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "cuda_runtime.h"
+#include "hip/hip_runtime.h"
 #include "nccl.h"
 
 /*
@@ -29,9 +29,9 @@
 
 #define NCCLXFER_CUDACHECK(cmd)                                                                               \
   do {                                                                                                        \
-    cudaError_t err = (cmd);                                                                                  \
-    if (err != cudaSuccess) {                                                                                 \
-      fprintf(stderr, "[nccl-reshard] CUDA error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+    hipError_t err = (cmd);                                                                                  \
+    if (err != hipSuccess) {                                                                                 \
+      fprintf(stderr, "[nccl-reshard] CUDA error %s:%d '%s'\n", __FILE__, __LINE__, hipGetErrorString(err)); \
       return ncclSystemError;                                                                                 \
     }                                                                                                         \
   } while (0)
@@ -52,10 +52,10 @@
 
 #define NCCLXFER_CUDACHECK_WARN(cmd)                                                             \
   do {                                                                                           \
-    cudaError_t err = (cmd);                                                                     \
-    if (err != cudaSuccess) {                                                                    \
+    hipError_t err = (cmd);                                                                     \
+    if (err != hipSuccess) {                                                                    \
       fprintf(stderr, "[nccl-reshard] CUDA error %s:%d '%s' (continuing)\n", __FILE__, __LINE__, \
-              cudaGetErrorString(err));                                                          \
+              hipGetErrorString(err));                                                          \
     }                                                                                            \
   } while (0)
 

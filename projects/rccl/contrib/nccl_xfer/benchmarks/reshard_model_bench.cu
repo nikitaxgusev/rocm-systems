@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -749,8 +750,8 @@ int main(int argc, char* argv[]) {
   // ========================================================================
   int localRank = mpiRank % gpusPerNode;
   int numDevices;
-  CUDACHECK(cudaGetDeviceCount(&numDevices));
-  CUDACHECK(cudaSetDevice(localRank % numDevices));
+  CUDACHECK(hipGetDeviceCount(&numDevices));
+  CUDACHECK(hipSetDevice(localRank % numDevices));
 
   MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
 
@@ -762,7 +763,7 @@ int main(int argc, char* argv[]) {
     int localRank = -1;
     int commSize = 0;
     bool participates = false;
-    cudaStream_t stream = nullptr;
+    hipStream_t stream = nullptr;
   };
 
   std::map<std::pair<int, int>, PPCommEntry> ppComms;
@@ -797,7 +798,7 @@ int main(int argc, char* argv[]) {
     if (participates) {
       entry.localRank = key;
       NCCLCHECK(ncclCommInitRank(&entry.comm, entry.commSize, uniqueId, key));
-      CUDACHECK(cudaStreamCreate(&entry.stream));
+      CUDACHECK(hipStreamCreate(&entry.stream));
     }
 
     ppComms[{tStage, gStage}] = entry;
@@ -836,7 +837,7 @@ int main(int argc, char* argv[]) {
     TransferBufferEntry& tbe = transferBuffers[i];
     tbe.allocSize = bufSize;
     NCCLCHECK(ncclMemAlloc(&tbe.buffer, bufSize));
-    CUDACHECK(cudaMemset(tbe.buffer, 0, bufSize));
+    CUDACHECK(hipMemset(tbe.buffer, 0, bufSize));
     NCCLCHECK(ncclCommWindowRegister(commEntry.comm, tbe.buffer, bufSize, &tbe.window, NCCL_WIN_COLL_SYMMETRIC));
 
     if (verbose) {
@@ -873,7 +874,7 @@ int main(int argc, char* argv[]) {
     if (commIt == ppComms.end() || !commIt->second.participates) return;
 
     ncclComm_t comm = commIt->second.comm;
-    cudaStream_t stream = commIt->second.stream;
+    hipStream_t stream = commIt->second.stream;
     void* buffer = tbe.buffer;
     ncclWindow_t win = tbe.window;
 
@@ -916,7 +917,7 @@ int main(int argc, char* argv[]) {
 
   auto syncAllStreams = [&]() {
     for (auto& [key, entry] : ppComms)
-      if (entry.participates) CUDACHECK(cudaStreamSynchronize(entry.stream));
+      if (entry.participates) CUDACHECK(hipStreamSynchronize(entry.stream));
   };
 
   // ========================================================================
@@ -1007,7 +1008,7 @@ int main(int argc, char* argv[]) {
           auto commIt = ppComms.find(key);
           if (commIt == ppComms.end() || !commIt->second.participates) continue;
 
-          cudaStream_t stream = commIt->second.stream;
+          hipStream_t stream = commIt->second.stream;
           bool rankIsTrainInComm = (commIt->second.localRank < trainStageSize);
 
           if (rankIsTrainInComm) {
@@ -1026,7 +1027,7 @@ int main(int argc, char* argv[]) {
             benchInitSourceData((char*)tbe.buffer, localDims, td.ndims, shardDim, shardIdx, shardCount, stream, vi,
                                 (int)idx);
           } else if (vi == 0) {
-            CUDACHECK(cudaMemsetAsync(tbe.buffer, 0, tbe.allocSize, stream));
+            CUDACHECK(hipMemsetAsync(tbe.buffer, 0, tbe.allocSize, stream));
           }
         }
         syncAllStreams();
@@ -1084,7 +1085,7 @@ int main(int argc, char* argv[]) {
       if (!isTrainer) {
         for (size_t idx : pg.transferIndices) {
           auto& tbe = transferBuffers[idx];
-          CUDACHECK(cudaMemset(tbe.buffer, 0, tbe.allocSize));
+          CUDACHECK(hipMemset(tbe.buffer, 0, tbe.allocSize));
         }
       }
       MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
@@ -1094,7 +1095,7 @@ int main(int argc, char* argv[]) {
     double totalLatMs = 0.0;
     for (int it = 0; it < iterations; it++) {
       MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
-      CUDACHECK(cudaDeviceSynchronize());
+      CUDACHECK(hipDeviceSynchronize());
 
       auto t0 = std::chrono::high_resolution_clock::now();
       runGroup();
@@ -1249,7 +1250,7 @@ int main(int argc, char* argv[]) {
   }
 
   for (auto& [key, entry] : ppComms) {
-    if (entry.stream) CUDACHECK(cudaStreamDestroy(entry.stream));
+    if (entry.stream) CUDACHECK(hipStreamDestroy(entry.stream));
     if (entry.comm) ncclCommDestroy(entry.comm);
   }
 

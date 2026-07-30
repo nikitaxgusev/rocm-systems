@@ -25,7 +25,7 @@ struct DevCommCacheEntry {
   ncclComm_t comm;
   int numCtas;
   int ginSignalCount;
-  cudaStream_t stream;
+  hipStream_t stream;
   bool valid;
   ncclDevComm devComm;
 };
@@ -36,8 +36,8 @@ struct DevCommCacheEntry {
 struct StreamPoolEntry {
   ncclComm_t comm;
   int dev;
-  cudaStream_t stream = nullptr;
-  cudaEvent_t event = nullptr;
+  hipStream_t stream = nullptr;
+  hipEvent_t event = nullptr;
 };
 
 static WindowCache gInternalWindowCache = {};
@@ -88,7 +88,7 @@ ncclResult_t cacheInternalWindow(ncclComm_t comm, void* buffer, size_t size, ncc
   return cacheWindow(&gInternalWindowCache, comm, buffer, size, window);
 }
 
-ncclDevComm* findCachedDevComm(ncclComm_t comm, int numCtas, int signalCount, cudaStream_t stream) {
+ncclDevComm* findCachedDevComm(ncclComm_t comm, int numCtas, int signalCount, hipStream_t stream) {
   for (int i = 0; i < gDevcommCacheCount; i++) {
     DevCommCacheEntry& e = gDevcommCache[i];
     if (e.valid && e.comm == comm && e.numCtas == numCtas && e.ginSignalCount == signalCount && e.stream == stream)
@@ -98,7 +98,7 @@ ncclDevComm* findCachedDevComm(ncclComm_t comm, int numCtas, int signalCount, cu
 }
 
 ncclResult_t cacheDevComm(ncclComm_t comm, int numCtas, int signalCount, const ncclDevComm* devComm,
-                          cudaStream_t stream) {
+                          hipStream_t stream) {
   int idx;
   if (gDevcommCacheCount >= MAX_DEVCOMM_CACHE_ENTRIES) {
     idx = gDevcommCacheNextIdx;
@@ -140,13 +140,13 @@ void cacheFinalize() {
   gDevcommCacheCount = 0;
 
   for (StreamPoolEntry& e : gStreamPool) {
-    if (e.event != nullptr) NCCLXFER_CUDACHECK_WARN(cudaEventDestroy(e.event));
-    if (e.stream != nullptr) NCCLXFER_CUDACHECK_WARN(cudaStreamDestroy(e.stream));
+    if (e.event != nullptr) NCCLXFER_CUDACHECK_WARN(hipEventDestroy(e.event));
+    if (e.stream != nullptr) NCCLXFER_CUDACHECK_WARN(hipStreamDestroy(e.stream));
   }
   gStreamPool.clear();
 }
 
-ncclResult_t streamPoolAcquire(ncclComm_t comm, int dev, cudaStream_t* outStream, cudaEvent_t* outEvent) {
+ncclResult_t streamPoolAcquire(ncclComm_t comm, int dev, hipStream_t* outStream, hipEvent_t* outEvent) {
   if (outStream == nullptr || outEvent == nullptr) return ncclInvalidArgument;
   /* Pool disabled (NCCLXFER_RESHARD_STREAM_POOL_SIZE <= 0) — caller
    * should have gated on reshardGetStreamPoolSize() > 0; defend
@@ -181,10 +181,10 @@ ncclResult_t streamPoolAcquire(ncclComm_t comm, int dev, cudaStream_t* outStream
   StreamPoolEntry fresh;
   fresh.comm = comm;
   fresh.dev = dev;
-  if (cudaStreamCreateWithFlags(&fresh.stream, cudaStreamNonBlocking) != cudaSuccess ||
-      cudaEventCreateWithFlags(&fresh.event, cudaEventDisableTiming) != cudaSuccess) {
-    if (fresh.event != nullptr) NCCLXFER_CUDACHECK_WARN(cudaEventDestroy(fresh.event));
-    if (fresh.stream != nullptr) NCCLXFER_CUDACHECK_WARN(cudaStreamDestroy(fresh.stream));
+  if (hipStreamCreateWithFlags(&fresh.stream, hipStreamNonBlocking) != hipSuccess ||
+      hipEventCreateWithFlags(&fresh.event, hipEventDisableTiming) != hipSuccess) {
+    if (fresh.event != nullptr) NCCLXFER_CUDACHECK_WARN(hipEventDestroy(fresh.event));
+    if (fresh.stream != nullptr) NCCLXFER_CUDACHECK_WARN(hipStreamDestroy(fresh.stream));
     return ncclSystemError;
   }
   gStreamPool.push_back(fresh);

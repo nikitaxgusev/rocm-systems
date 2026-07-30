@@ -21,7 +21,7 @@
 
 #include <cstddef>
 
-#include "cuda_runtime.h"
+#include "hip/hip_runtime.h"
 #include "nccl.h"
 
 #include "reshard_limits.h"
@@ -263,8 +263,8 @@ struct TransposeBufferEntry {
   ncclComm_t comm;
   void* buffer;
   size_t capacity;
-  cudaStream_t stream; /* last stream that used this buffer */
-  cudaEvent_t event; /* recorded after UNPACK; used for cross-stream sync */
+  hipStream_t stream; /* last stream that used this buffer */
+  hipEvent_t event; /* recorded after UNPACK; used for cross-stream sync */
   bool allocated;
 };
 

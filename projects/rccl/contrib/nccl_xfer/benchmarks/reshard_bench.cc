@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -223,8 +224,8 @@ int main(int argc, char* argv[]) {
 
   // Setup CUDA device
   int numDevices;
-  CUDACHECK(cudaGetDeviceCount(&numDevices));
-  CUDACHECK(cudaSetDevice(mpiRank % numDevices));
+  CUDACHECK(hipGetDeviceCount(&numDevices));
+  CUDACHECK(hipSetDevice(mpiRank % numDevices));
 
   // Create NCCL communicator
   ncclUniqueId worldId;
@@ -246,7 +247,7 @@ int main(int argc, char* argv[]) {
 
   void* buffer;
   NCCLCHECK(ncclMemAlloc(&buffer, allocSize));
-  CUDACHECK(cudaMemset(buffer, 0xDE, allocSize)); // Initialize with pattern
+  CUDACHECK(hipMemset(buffer, 0xDE, allocSize)); // Initialize with pattern
 
   // Register window for user-window API
   ncclWindow_t window = nullptr;
@@ -262,15 +263,15 @@ int main(int argc, char* argv[]) {
                                    .placement = {NCCLXFER_RESHARD_REPLICATE, NCCLXFER_RESHARD_SHARD(dstShardDim)}};
 
   // Create CUDA stream
-  cudaStream_t stream;
-  CUDACHECK(cudaStreamCreate(&stream));
+  hipStream_t stream;
+  CUDACHECK(hipStreamCreate(&stream));
 
   // Stream we actually pass to ncclXferReshardWithWindow.  When
   // --use-default-stream is set we pass nullptr, exercising the
   // library's internal stream pool; otherwise we hand the explicit
   // stream through.  Init / validation kernels still use the
   // explicit stream regardless.
-  cudaStream_t reshardStream = useDefaultStream ? (cudaStream_t)0 : stream;
+  hipStream_t reshardStream = useDefaultStream ? (hipStream_t)0 : stream;
 
   // Initialize source data for validation
   if (isSource && validate) {
@@ -279,7 +280,7 @@ int main(int argc, char* argv[]) {
     int shardIdx = localRank % srcMeshDims[1]; // Shard dim is mesh dim 1
 
     benchInitSourceData((char*)buffer, srcLocalDims, ndims, srcShardDim, shardIdx, srcShardCount, stream);
-    CUDACHECK(cudaStreamSynchronize(stream));
+    CUDACHECK(hipStreamSynchronize(stream));
   }
 
   MPICHECK(MPI_Barrier(benchMpiWorld()));
@@ -316,7 +317,7 @@ int main(int argc, char* argv[]) {
 
   for (int i = 0; i < warmup; i++) {
     runOneIteration();
-    CUDACHECK(cudaStreamSynchronize(reshardStream));
+    CUDACHECK(hipStreamSynchronize(reshardStream));
     MPICHECK(MPI_Barrier(benchMpiWorld()));
   }
 
@@ -350,7 +351,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Reset dest buffer for timing runs
-    if (isDest) CUDACHECK(cudaMemset(buffer, 0xDE, dstBufferSize));
+    if (isDest) CUDACHECK(hipMemset(buffer, 0xDE, dstBufferSize));
     MPICHECK(MPI_Barrier(benchMpiWorld()));
   }
 
@@ -362,7 +363,7 @@ int main(int argc, char* argv[]) {
 
   for (int iter = 0; iter < iterations; iter++) {
     runOneIteration();
-    CUDACHECK(cudaStreamSynchronize(reshardStream));
+    CUDACHECK(hipStreamSynchronize(reshardStream));
     MPICHECK(MPI_Barrier(benchMpiWorld()));
   }
 
@@ -465,7 +466,7 @@ int main(int argc, char* argv[]) {
   ncclCommWindowDeregister(worldComm, window);
   ncclXferReshardFinalize();
   NCCLCHECK(ncclMemFree(buffer));
-  CUDACHECK(cudaStreamDestroy(stream));
+  CUDACHECK(hipStreamDestroy(stream));
   ncclCommDestroy(worldComm);
 
   MPICHECK(MPI_Finalize());

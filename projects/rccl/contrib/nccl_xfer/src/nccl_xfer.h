@@ -21,7 +21,7 @@
 #include <limits.h>
 #include <stddef.h>
 
-#include "cuda_runtime.h"
+#include "hip/hip_runtime.h"
 #include "nccl.h"
 
 #ifdef __cplusplus
@@ -173,7 +173,7 @@ ncclResult_t ncclXferReshardFinalize(void);
  *         precondition is violated.
  */
 ncclResult_t ncclXferReshardWithWindow(ncclComm_t comm, ncclWindow_t window, const ncclXferDistTensor_t* src,
-                                       const ncclXferDistTensor_t* dst, cudaStream_t stream);
+                                       const ncclXferDistTensor_t* dst, hipStream_t stream);
 
 #ifdef __cplusplus
 }

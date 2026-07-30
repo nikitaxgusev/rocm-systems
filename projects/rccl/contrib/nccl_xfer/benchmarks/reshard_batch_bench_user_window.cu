@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -132,7 +133,7 @@ benchInitSourceData
     int           shardDim,
     int           shardIdx,
     int           shardCount,
-    cudaStream_t  stream,
+    hipStream_t  stream,
     int           iteration = 0,
     int           bufferId  = 0
 )
@@ -165,7 +166,7 @@ benchValidateDestData
     int           shardIdx,
     int           shardCount,
     int           worldRank,
-    cudaStream_t  stream,
+    hipStream_t  stream,
     int           iteration = 0,
     int           bufferId  = 0
 )
@@ -179,8 +180,8 @@ benchValidateDestData
   unsigned salt = (unsigned)iteration * 37U + (unsigned)bufferId * 131U;
 
   unsigned long long* pDevErr;
-  CUDACHECK(cudaMalloc(&pDevErr, sizeof(unsigned long long)));
-  CUDACHECK(cudaMemsetAsync(pDevErr, 0, sizeof(unsigned long long), stream));
+  CUDACHECK(hipMalloc(&pDevErr, sizeof(unsigned long long)));
+  CUDACHECK(hipMemsetAsync(pDevErr, 0, sizeof(unsigned long long), stream));
 
   int blockSize = 256;
   size_t total = pLocalDims[0] * pLocalDims[1] * (nDims == 3 ? pLocalDims[2] : 1);
@@ -190,9 +191,9 @@ benchValidateDestData
     globalStart[2], globalDims[1], globalDims[2], salt, pDevErr);
 
   unsigned long long hErr;
-  CUDACHECK(cudaMemcpyAsync(&hErr, pDevErr, sizeof(unsigned long long), cudaMemcpyDeviceToHost, stream));
-  CUDACHECK(cudaStreamSynchronize(stream));
-  CUDACHECK(cudaFree(pDevErr));
+  CUDACHECK(hipMemcpyAsync(&hErr, pDevErr, sizeof(unsigned long long), hipMemcpyDeviceToHost, stream));
+  CUDACHECK(hipStreamSynchronize(stream));
+  CUDACHECK(hipFree(pDevErr));
   if (hErr > 0) {
     printf("[Rank %d] VALIDATION FAILED: %llu mismatches\n", worldRank, hErr);
     return false;
@@ -400,8 +401,8 @@ int main(int argc, char* argv[]) {
   bool bIsDest = !bIsSource;
 
   int numDevices;
-  CUDACHECK(cudaGetDeviceCount(&numDevices));
-  CUDACHECK(cudaSetDevice(mpiRank % numDevices));
+  CUDACHECK(hipGetDeviceCount(&numDevices));
+  CUDACHECK(hipSetDevice(mpiRank % numDevices));
 
   if (bVerbose) benchSetEnv("NCCLXFER_RESHARD_LOG_LEVEL", "DEBUG");
   benchSetEnv("NCCLXFER_RESHARD_ALGORITHM", algorithm);
@@ -446,14 +447,14 @@ int main(int argc, char* argv[]) {
   std::vector<ncclWindow_t> windows(numTensors, nullptr);
   for (int i = 0; i < numTensors; i++) {
     NCCLCHECK(ncclMemAlloc(&bufs[i], maxAlloc));
-    CUDACHECK(cudaMemset(bufs[i], 0xDE, maxAlloc));
+    CUDACHECK(hipMemset(bufs[i], 0xDE, maxAlloc));
     NCCLCHECK(ncclCommWindowRegister(comms[i % numComms], bufs[i], maxAlloc, &windows[i], NCCL_WIN_COLL_SYMMETRIC));
   }
 
-  std::vector<cudaStream_t> streams(numTensors);
-  for (int i = 0; i < numTensors; i++) CUDACHECK(cudaStreamCreate(&streams[i]));
-  cudaStream_t seqStream;
-  CUDACHECK(cudaStreamCreate(&seqStream));
+  std::vector<hipStream_t> streams(numTensors);
+  for (int i = 0; i < numTensors; i++) CUDACHECK(hipStreamCreate(&streams[i]));
+  hipStream_t seqStream;
+  CUDACHECK(hipStreamCreate(&seqStream));
 
   if (mpiRank == 0) {
     printf("=== Batched Transfer Benchmark — User Window API ===\n");
@@ -515,12 +516,12 @@ int main(int argc, char* argv[]) {
         int sidx = mpiRank % srcSc;
         for (int i = 0; i < numTensors; i++)
           benchInitSourceData((char*)bufs[i], srcLocal, tc.nDims, sc.srcSd, sidx, srcSc, streams[i]);
-        for (int i = 0; i < numTensors; i++) CUDACHECK(cudaStreamSynchronize(streams[i]));
+        for (int i = 0; i < numTensors; i++) CUDACHECK(hipStreamSynchronize(streams[i]));
       }
       MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
 
       // --- one reshard for tensor i on stream s, comm[i % numComms]
-      auto oneTransfer = [&](int i, cudaStream_t s) {
+      auto oneTransfer = [&](int i, hipStream_t s) {
         ncclXferDistTensor_t srcT = {};
         srcT.ndims = tc.nDims;
         srcT.dtype = ncclInt8; // bench validates byte patterns
@@ -543,13 +544,13 @@ int main(int argc, char* argv[]) {
       auto runSequential = [&]() {
         for (int i = 0; i < numTensors; i++) {
           oneTransfer(i, seqStream);
-          CUDACHECK(cudaStreamSynchronize(seqStream));
+          CUDACHECK(hipStreamSynchronize(seqStream));
         }
       };
 
       auto runConcurrent = [&]() {
         for (int i = 0; i < numTensors; i++) oneTransfer(i, streams[i]);
-        for (int i = 0; i < numTensors; i++) CUDACHECK(cudaStreamSynchronize(streams[i]));
+        for (int i = 0; i < numTensors; i++) CUDACHECK(hipStreamSynchronize(streams[i]));
       };
 
       // Warmup (mix both patterns so the devComm caches stay warm)
@@ -586,7 +587,7 @@ int main(int argc, char* argv[]) {
           continue;
         }
         if (bIsDest)
-          for (int i = 0; i < numTensors; i++) CUDACHECK(cudaMemset(bufs[i], 0xDE, maxAlloc));
+          for (int i = 0; i < numTensors; i++) CUDACHECK(hipMemset(bufs[i], 0xDE, maxAlloc));
         MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
       }
 
@@ -652,8 +653,8 @@ int main(int argc, char* argv[]) {
   for (int i = 0; i < numTensors; i++) ncclCommWindowDeregister(comms[i % numComms], windows[i]);
   ncclXferReshardFinalize();
   for (auto& b : bufs) NCCLCHECK(ncclMemFree(b));
-  for (auto& s : streams) CUDACHECK(cudaStreamDestroy(s));
-  CUDACHECK(cudaStreamDestroy(seqStream));
+  for (auto& s : streams) CUDACHECK(hipStreamDestroy(s));
+  CUDACHECK(hipStreamDestroy(seqStream));
   for (auto& c : comms) ncclCommDestroy(c);
 
   MPICHECK(MPI_Finalize());

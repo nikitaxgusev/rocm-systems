@@ -17,7 +17,7 @@
 #include <cstring>
 
 #include <mpi.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <nccl.h>
 
 // ============================================================================
@@ -62,9 +62,9 @@ static inline int benchParseInt(const char* s, const char* what) {
 
 #define CUDACHECK(cmd)                                                                               \
   do {                                                                                               \
-    cudaError_t e = cmd;                                                                             \
-    if (e != cudaSuccess) {                                                                          \
-      fprintf(stderr, "Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
+    hipError_t e = cmd;                                                                             \
+    if (e != hipSuccess) {                                                                          \
+      fprintf(stderr, "Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, hipGetErrorString(e)); \
       abort();                                                                                       \
     }                                                                                                \
   } while (0)

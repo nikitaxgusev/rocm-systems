@@ -6,7 +6,7 @@
  ************************************************************************/
 
 #include <cstdio>
-#include "cuda_runtime.h"
+#include "hip/hip_runtime.h"
 #include "nccl.h"
 #include "reshard_types.h"
 #include "reshard_checks.h"
@@ -38,12 +38,12 @@ static TransposeBufferEntry* findPoolEntry(ncclComm_t comm) {
   return nullptr;
 }
 
-ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, cudaStream_t stream) {
+ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, hipStream_t stream) {
   TransposeBufferEntry* entry = findPoolEntry(comm);
 
   if (entry != nullptr) {
     if (entry->stream != stream) {
-      NCCLXFER_CUDACHECK(cudaStreamWaitEvent(stream, entry->event, 0));
+      NCCLXFER_CUDACHECK(hipStreamWaitEvent(stream, entry->event, 0));
       entry->stream = stream;
     }
 
@@ -87,7 +87,7 @@ ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, cudaSt
   e.capacity = 0;
   e.allocated = true;
 
-  NCCLXFER_CUDACHECK(cudaEventCreateWithFlags(&e.event, cudaEventDisableTiming));
+  NCCLXFER_CUDACHECK(hipEventCreateWithFlags(&e.event, hipEventDisableTiming));
 
   NCCLXFER_CHECK(ncclMemAlloc(&e.buffer, requiredBytes));
   e.capacity = requiredBytes;
@@ -106,15 +106,15 @@ size_t getTransposeBufferCapacity(ncclComm_t comm) {
   return (e != nullptr) ? e->capacity : 0;
 }
 
-ncclResult_t transposeBufferRecordEvent(ncclComm_t comm, cudaStream_t stream) {
+ncclResult_t transposeBufferRecordEvent(ncclComm_t comm, hipStream_t stream) {
   TransposeBufferEntry* e = findPoolEntry(comm);
-  if (e != nullptr) NCCLXFER_CUDACHECK(cudaEventRecord(e->event, stream));
+  if (e != nullptr) NCCLXFER_CUDACHECK(hipEventRecord(e->event, stream));
   return ncclSuccess;
 }
 
 void transposeBufferFinalize() {
   for (int i = 0; i < gPoolCount; i++) {
-    if (gPool[i].event != nullptr) cudaEventDestroy(gPool[i].event);
+    if (gPool[i].event != nullptr) hipEventDestroy(gPool[i].event);
     if (gPool[i].buffer != nullptr) ncclMemFree(gPool[i].buffer);
     gPool[i] = {};
   }

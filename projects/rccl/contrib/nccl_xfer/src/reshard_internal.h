@@ -140,10 +140,10 @@ inline size_t pickElementsPerChunk(size_t bytesPerRank, ReshardAlgorithm algo) {
  * reshard_cache.cc — DevComm and Window caches
  * ====================================================================*/
 
-ncclDevComm* findCachedDevComm(ncclComm_t comm, int numCtas, int signalCount, cudaStream_t stream = nullptr);
+ncclDevComm* findCachedDevComm(ncclComm_t comm, int numCtas, int signalCount, hipStream_t stream = nullptr);
 
 ncclResult_t cacheDevComm(ncclComm_t comm, int numCtas, int signalCount, const ncclDevComm* devComm,
-                          cudaStream_t stream = nullptr);
+                          hipStream_t stream = nullptr);
 
 ncclWindow_t* findCachedInternalWindowByPtr(ncclComm_t comm, void* buffer, size_t size);
 
@@ -161,7 +161,7 @@ ncclResult_t cacheInternalWindow(ncclComm_t comm, void* buffer, size_t size, ncc
  * NCCLXFER_RESHARD_STREAM_POOL_SIZE, returns ncclSuccess with *outStream
  * and *outEvent both set to nullptr (warns once).  Callers should
  * check that and run on the caller's default stream directly. */
-ncclResult_t streamPoolAcquire(ncclComm_t comm, int dev, cudaStream_t* outStream, cudaEvent_t* outEvent);
+ncclResult_t streamPoolAcquire(ncclComm_t comm, int dev, hipStream_t* outStream, hipEvent_t* outEvent);
 
 void cacheFinalize();
 
@@ -221,10 +221,10 @@ ncclXferDirectReshardParams prepareDirectReshardParams(
 bool shouldTransposeForCrossDim(const size_t* srcDimsBytes, const size_t* dstDimsBytes, int ndims, int srcShardDim,
                                 int dstShardDim, int srcShardCount, int dstShardCount, int* swapDimA, int* swapDimB);
 
-ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, cudaStream_t stream);
+ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, hipStream_t stream);
 void* getTransposeBuffer(ncclComm_t comm);
 size_t getTransposeBufferCapacity(ncclComm_t comm);
 void transposeBufferFinalize();
-ncclResult_t transposeBufferRecordEvent(ncclComm_t comm, cudaStream_t stream);
+ncclResult_t transposeBufferRecordEvent(ncclComm_t comm, hipStream_t stream);
 
 #endif /* NCCLXFER_RESHARD_INTERNAL_H_ */

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -75,7 +76,7 @@ static __global__ void benchValidateDestDataKernel(
 // ============================================================================
 
 void benchInitSourceData(char* pBuffer, const size_t pLocalDims[], int nDims, int shardDim, int shardIdx,
-                         int shardCount, cudaStream_t stream, int iteration, int bufferId) {
+                         int shardCount, hipStream_t stream, int iteration, int bufferId) {
   size_t globalStart[3] = {0, 0, 0};
   size_t globalDims[3] = {pLocalDims[0], pLocalDims[1], nDims == 3 ? pLocalDims[2] : 1};
 
@@ -96,7 +97,7 @@ void benchInitSourceData(char* pBuffer, const size_t pLocalDims[], int nDims, in
 }
 
 bool benchValidateDestData(const char* pBuffer, const size_t pLocalDims[], int nDims, int shardDim, int shardIdx,
-                           int shardCount, int worldRank, cudaStream_t stream, int iteration, int bufferId) {
+                           int shardCount, int worldRank, hipStream_t stream, int iteration, int bufferId) {
   size_t globalStart[3] = {0, 0, 0};
   size_t globalDims[3] = {pLocalDims[0], pLocalDims[1], nDims == 3 ? pLocalDims[2] : 1};
 
@@ -112,11 +113,11 @@ bool benchValidateDestData(const char* pBuffer, const size_t pLocalDims[], int n
   char* pDevFirstErrorExpected;
   char* pDevFirstErrorActual;
 
-  CUDACHECK(cudaMalloc(&pDevErrorCount, sizeof(unsigned long long)));
-  CUDACHECK(cudaMalloc(&pDevFirstErrorIdx, sizeof(size_t)));
-  CUDACHECK(cudaMalloc(&pDevFirstErrorExpected, sizeof(char)));
-  CUDACHECK(cudaMalloc(&pDevFirstErrorActual, sizeof(char)));
-  CUDACHECK(cudaMemset(pDevErrorCount, 0, sizeof(unsigned long long)));
+  CUDACHECK(hipMalloc(&pDevErrorCount, sizeof(unsigned long long)));
+  CUDACHECK(hipMalloc(&pDevFirstErrorIdx, sizeof(size_t)));
+  CUDACHECK(hipMalloc(&pDevFirstErrorExpected, sizeof(char)));
+  CUDACHECK(hipMalloc(&pDevFirstErrorActual, sizeof(char)));
+  CUDACHECK(hipMemset(pDevErrorCount, 0, sizeof(unsigned long long)));
 
   int blockSize = 256;
   size_t total = pLocalDims[0] * pLocalDims[1] * (nDims == 3 ? pLocalDims[2] : 1);
@@ -131,17 +132,17 @@ bool benchValidateDestData(const char* pBuffer, const size_t pLocalDims[], int n
   size_t hFirstErrorIdx;
   char hFirstErrorExpected, hFirstErrorActual;
 
-  CUDACHECK(cudaMemcpyAsync(&hErrorCount, pDevErrorCount, sizeof(unsigned long long), cudaMemcpyDeviceToHost, stream));
-  CUDACHECK(cudaMemcpyAsync(&hFirstErrorIdx, pDevFirstErrorIdx, sizeof(size_t), cudaMemcpyDeviceToHost, stream));
-  CUDACHECK(cudaMemcpyAsync(&hFirstErrorExpected, pDevFirstErrorExpected, sizeof(char), cudaMemcpyDeviceToHost,
+  CUDACHECK(hipMemcpyAsync(&hErrorCount, pDevErrorCount, sizeof(unsigned long long), hipMemcpyDeviceToHost, stream));
+  CUDACHECK(hipMemcpyAsync(&hFirstErrorIdx, pDevFirstErrorIdx, sizeof(size_t), hipMemcpyDeviceToHost, stream));
+  CUDACHECK(hipMemcpyAsync(&hFirstErrorExpected, pDevFirstErrorExpected, sizeof(char), hipMemcpyDeviceToHost,
                             stream));
-  CUDACHECK(cudaMemcpyAsync(&hFirstErrorActual, pDevFirstErrorActual, sizeof(char), cudaMemcpyDeviceToHost, stream));
-  CUDACHECK(cudaStreamSynchronize(stream));
+  CUDACHECK(hipMemcpyAsync(&hFirstErrorActual, pDevFirstErrorActual, sizeof(char), hipMemcpyDeviceToHost, stream));
+  CUDACHECK(hipStreamSynchronize(stream));
 
-  CUDACHECK(cudaFree(pDevErrorCount));
-  CUDACHECK(cudaFree(pDevFirstErrorIdx));
-  CUDACHECK(cudaFree(pDevFirstErrorExpected));
-  CUDACHECK(cudaFree(pDevFirstErrorActual));
+  CUDACHECK(hipFree(pDevErrorCount));
+  CUDACHECK(hipFree(pDevFirstErrorIdx));
+  CUDACHECK(hipFree(pDevFirstErrorExpected));
+  CUDACHECK(hipFree(pDevFirstErrorActual));
 
   if (hErrorCount > 0) {
     printf("[Rank %d] VALIDATION FAILED: %llu errors, first at idx %zu "

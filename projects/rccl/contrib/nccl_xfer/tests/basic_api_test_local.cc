@@ -24,7 +24,7 @@
 #include <vector>
 #include <pthread.h>
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <nccl.h>
 
 #include "nccl_xfer.h"
@@ -105,10 +105,10 @@ struct ThreadArg {
 static void* threadMain(void* p) {
   ThreadArg* a = (ThreadArg*)p;
 
-  TEST_CUDACHECK(cudaSetDevice(a->device));
+  TEST_CUDACHECK(hipSetDevice(a->device));
 
-  cudaStream_t stream;
-  TEST_CUDACHECK(cudaStreamCreate(&stream));
+  hipStream_t stream;
+  TEST_CUDACHECK(hipStreamCreate(&stream));
 
   void* buffer = nullptr;
   TEST_NCCLCHECK(ncclMemAlloc(&buffer, gBufferBytes));
@@ -136,7 +136,7 @@ static void* threadMain(void* p) {
   pthread_barrier_wait(&a->ctx->barrier);
 
   TEST_NCCLCHECK(ncclMemFree(buffer));
-  TEST_CUDACHECK(cudaStreamDestroy(stream));
+  TEST_CUDACHECK(hipStreamDestroy(stream));
   return nullptr;
 }
 
@@ -218,7 +218,7 @@ INSTANTIATE_TEST_CASE_P(Matrix, BasicApiLocalTest, ::testing::ValuesIn(basicApiS
                         gtestCaseName);
 
 static int initLocalRuntime() {
-  TEST_CUDACHECK(cudaGetDeviceCount(&gNumDevices));
+  TEST_CUDACHECK(hipGetDeviceCount(&gNumDevices));
   if (gNumDevices <= 0) {
     fprintf(stderr, "No CUDA devices visible.\n");
     return 2;

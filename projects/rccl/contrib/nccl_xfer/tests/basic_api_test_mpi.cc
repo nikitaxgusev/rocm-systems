@@ -25,7 +25,7 @@
 #include <vector>
 
 #include <mpi.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <nccl.h>
 
 #include "nccl_xfer.h"
@@ -101,7 +101,7 @@ static int gWorldSize = 0;
 static int gNumDevices = 0;
 static int gDevice = 0;
 static ncclComm_t gComm = nullptr;
-static cudaStream_t gStream = nullptr;
+static hipStream_t gStream = nullptr;
 static void* gBuffer = nullptr;
 static size_t gBufferBytes = 4096;
 static std::string gActiveAlgorithm;
@@ -194,9 +194,9 @@ TEST_P(BasicApiMpiTest, Reshard) {
 INSTANTIATE_TEST_CASE_P(Matrix, BasicApiMpiTest, ::testing::ValuesIn(selectedParams()), gtestCaseName);
 
 static int initMpiRuntime() {
-  TEST_CUDACHECK(cudaGetDeviceCount(&gNumDevices));
+  TEST_CUDACHECK(hipGetDeviceCount(&gNumDevices));
   gDevice = gWorldRank % (gNumDevices > 0 ? gNumDevices : 1);
-  TEST_CUDACHECK(cudaSetDevice(gDevice));
+  TEST_CUDACHECK(hipSetDevice(gDevice));
 
   ncclUniqueId uid;
   if (gWorldRank == 0) TEST_NCCLCHECK(ncclGetUniqueId(&uid));
@@ -212,7 +212,7 @@ static int initMpiRuntime() {
   TEST_NCCLCHECK(ncclXferReshardInit(NULL));
   gActiveAlgorithm = initialAlgorithm;
 
-  TEST_CUDACHECK(cudaStreamCreate(&gStream));
+  TEST_CUDACHECK(hipStreamCreate(&gStream));
   TEST_NCCLCHECK(ncclMemAlloc(&gBuffer, gBufferBytes));
 
   if (gWorldRank == 0) {
@@ -225,7 +225,7 @@ static int initMpiRuntime() {
 
 static void shutdownMpiRuntime() {
   if (gBuffer != nullptr) TEST_NCCLCHECK(ncclMemFree(gBuffer));
-  if (gStream != nullptr) TEST_CUDACHECK(cudaStreamDestroy(gStream));
+  if (gStream != nullptr) TEST_CUDACHECK(hipStreamDestroy(gStream));
   TEST_NCCLCHECK(ncclXferReshardFinalize());
   if (gComm != nullptr) TEST_NCCLCHECK(ncclCommDestroy(gComm));
 }

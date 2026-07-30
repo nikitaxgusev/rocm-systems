@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -39,7 +40,7 @@
 #include <vector>
 #include <algorithm>
 
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <nccl.h>
 
 #include "nccl_xfer.h"
@@ -54,7 +55,7 @@ struct TestEnv {
   int worldSize;
   int device;
   ncclComm_t comm;
-  cudaStream_t stream;
+  hipStream_t stream;
   void* buffer;
   size_t bufferBytes;
   bool verbose;
@@ -1002,7 +1003,7 @@ static CaseResult runOneCase(const TestCase& tc, TestEnv* env) {
   /* ----- 6. window registration ----- */
   ncclWindow_t window = nullptr;
   TEST_NCCLCHECK(ncclCommWindowRegister(env->comm, env->buffer, env->bufferBytes, &window, NCCL_WIN_COLL_SYMMETRIC));
-  TEST_CUDACHECK(cudaMemsetAsync(env->buffer, 0xDE, env->bufferBytes, env->stream));
+  TEST_CUDACHECK(hipMemsetAsync(env->buffer, 0xDE, env->bufferBytes, env->stream));
 
   /* ----- 7. init source data ----- */
   if (isSrc) {
@@ -1011,7 +1012,7 @@ static CaseResult runOneCase(const TestCase& tc, TestEnv* env) {
     int sc = (tc.srcShardDim >= 0) ? srcShardCount : 1;
     testInitSourceData((char*)env->buffer, srcLocalBytesDims, tc.ndims, sd, srcShardIdx, sc, env->stream);
   }
-  TEST_CUDACHECK(cudaStreamSynchronize(env->stream));
+  TEST_CUDACHECK(hipStreamSynchronize(env->stream));
   env->barrier(env);
 
   /* ----- 8. resharding call ----- */
@@ -1065,7 +1066,7 @@ static CaseResult runOneCase(const TestCase& tc, TestEnv* env) {
     return makeFail("ncclXferReshardWithWindow returned error");
   }
 
-  TEST_CUDACHECK(cudaStreamSynchronize(env->stream));
+  TEST_CUDACHECK(hipStreamSynchronize(env->stream));
   env->barrier(env);
 
   /* ----- 9. validate dest ----- */
