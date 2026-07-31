@@ -203,12 +203,79 @@ static_assert(sizeof(rcclHwcAinic) / sizeof(rcclHwcAinic[0]) <= RCCL_TELEMETRY_M
 #endif
 
 /* ------------------------------------------------------------------ */
+/* MLX5 (NVIDIA/Mellanox ConnectX, mlx5_core driver)                   */
+/* ------------------------------------------------------------------ */
+/* RoCE counters exposed under                                         */
+/*   /sys/class/infiniband/<dev>/ports/<p>/hw_counters/                */
+/* PFC per-priority pause frames/duration come from `ethtool -S`.      */
+
+static const RcclHwCounterDesc rcclHwcMlx5[] = {
+  /* ECN / congestion notification (the primary congestion signals) */
+  HWC("np_ecn_marked_roce_packets", HWC_IB_SYSFS, "np_ecn_marked_roce_packets"),
+  HWC("np_cnp_sent",                HWC_IB_SYSFS, "np_cnp_sent"),
+  HWC("rp_cnp_handled",             HWC_IB_SYSFS, "rp_cnp_handled"),
+  HWC("rp_cnp_ignored",             HWC_IB_SYSFS, "rp_cnp_ignored"),
+  HWC("roce_slow_restart_cnps",     HWC_IB_SYSFS, "roce_slow_restart_cnps"),
+
+  /* Buffer exhaustion / drops / out-of-sequence / retransmits */
+  HWC("out_of_buffer",              HWC_IB_SYSFS, "out_of_buffer"),
+  HWC("out_of_sequence",            HWC_IB_SYSFS, "out_of_sequence"),
+  HWC("packet_seq_err",             HWC_IB_SYSFS, "packet_seq_err"),
+  HWC("implied_nak_seq_err",        HWC_IB_SYSFS, "implied_nak_seq_err"),
+  HWC("local_ack_timeout_err",      HWC_IB_SYSFS, "local_ack_timeout_err"),
+  HWC("rnr_nak_retry_err",          HWC_IB_SYSFS, "rnr_nak_retry_err"),
+  HWC("duplicate_request",          HWC_IB_SYSFS, "duplicate_request"),
+  HWC("roce_adp_retrans",           HWC_IB_SYSFS, "roce_adp_retrans"),
+  HWC("roce_adp_retrans_to",        HWC_IB_SYSFS, "roce_adp_retrans_to"),
+  HWC("roce_slow_restart",          HWC_IB_SYSFS, "roce_slow_restart"),
+  HWC("roce_slow_restart_trans",    HWC_IB_SYSFS, "roce_slow_restart_trans"),
+
+  /* Requester errors */
+  HWC("req_cqe_error",              HWC_IB_SYSFS, "req_cqe_error"),
+  HWC("req_cqe_flush_error",        HWC_IB_SYSFS, "req_cqe_flush_error"),
+  HWC("req_remote_access_errors",   HWC_IB_SYSFS, "req_remote_access_errors"),
+  HWC("req_remote_invalid_request", HWC_IB_SYSFS, "req_remote_invalid_request"),
+  HWC("req_rnr_retries_exceeded",   HWC_IB_SYSFS, "req_rnr_retries_exceeded"),
+  HWC("req_transport_retries_exceeded", HWC_IB_SYSFS, "req_transport_retries_exceeded"),
+
+  /* Responder errors */
+  HWC("resp_cqe_error",             HWC_IB_SYSFS, "resp_cqe_error"),
+  HWC("resp_cqe_flush_error",       HWC_IB_SYSFS, "resp_cqe_flush_error"),
+  HWC("resp_local_length_error",    HWC_IB_SYSFS, "resp_local_length_error"),
+  HWC("resp_remote_access_errors",  HWC_IB_SYSFS, "resp_remote_access_errors"),
+
+  /* RDMA request traffic (context for the error rates) */
+  HWC("rx_write_requests",          HWC_IB_SYSFS, "rx_write_requests"),
+  HWC("rx_read_requests",           HWC_IB_SYSFS, "rx_read_requests"),
+  HWC("rx_atomic_requests",         HWC_IB_SYSFS, "rx_atomic_requests"),
+};
+
+static const RcclHwConfig rcclHwConfigMlx5 = {
+  "mlx5",
+  rcclHwcMlx5,
+  (int)(sizeof(rcclHwcMlx5) / sizeof(rcclHwcMlx5[0])),
+  /* PFC per-priority pause frames + pause duration, from ethtool -S. */
+  { "rx_prio%d_pause",          "tx_prio%d_pause",
+    "rx_prio%d_pause_duration", "tx_prio%d_pause_duration" },
+  { HWC_ETHTOOL, "tx_bytes", "rx_bytes", "tx_packets", "rx_packets" },
+};
+
+#ifndef __cplusplus
+_Static_assert(sizeof(rcclHwcMlx5) / sizeof(rcclHwcMlx5[0]) <= RCCL_TELEMETRY_MAX_HWC,
+               "MLX5 counter table exceeds RCCL_TELEMETRY_MAX_HWC");
+#else
+static_assert(sizeof(rcclHwcMlx5) / sizeof(rcclHwcMlx5[0]) <= RCCL_TELEMETRY_MAX_HWC,
+              "MLX5 counter table exceeds RCCL_TELEMETRY_MAX_HWC");
+#endif
+
+/* ------------------------------------------------------------------ */
 /* Driver name → HW config resolution                                  */
 /* ------------------------------------------------------------------ */
 
 static const RcclHwConfig* rcclTelemetryResolveHw(const char* driver_name) {
   if (driver_name == NULL || driver_name[0] == '\0') return NULL;
   if (strcmp(driver_name, "ionic") == 0)               return &rcclHwConfigAinic;
+  if (strcmp(driver_name, "mlx5_core") == 0)           return &rcclHwConfigMlx5;
   return NULL;
 }
 

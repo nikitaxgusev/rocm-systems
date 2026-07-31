@@ -75,12 +75,12 @@ __hidden void printCollEventHeader(FILE* fh, struct collective* event) {
           event->base.func, collId, getpid(), 1, event->base.startTs, event->seqNumber, ((struct collApi*)event->base.parent)->ctx->commHash, event->base.rank, event->count, event->datatype, event->algo, event->proto, event->nChannels);
   // Per-collective RCCL network telemetry, attributed exactly from child QP
   // (NetPlugin) events of this collective. tel_tx_bytes is exact (send WQE length
-  // is known at post time). Receive byte counts are not available from the
-  // net-post profiler event (RDMA recv size is only known at completion), so we
-  // report tel_wqe_rcvd (count) but not rx bytes.
+  // is known at post time). tel_rx_bytes is summed from recv WQE lengths, which
+  // are known at completion; since this header is emitted after the collective
+  // stops, the accumulated value is final here.
   if (event->telValid) {
-    fprintf(fh, ", \"tel_tx_bytes\": %lu, \"tel_wqe_sent\": %lu, \"tel_wqe_rcvd\": %lu",
-            (unsigned long)event->telTxBytes,
+    fprintf(fh, ", \"tel_tx_bytes\": %lu, \"tel_rx_bytes\": %lu, \"tel_wqe_sent\": %lu, \"tel_wqe_rcvd\": %lu",
+            (unsigned long)event->telTxBytes, (unsigned long)event->telRxBytes,
             (unsigned long)event->telWqeSent, (unsigned long)event->telWqeRcvd);
   }
   fprintf(fh, "}},\n");
