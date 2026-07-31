@@ -54,6 +54,23 @@ HIPIFY      := $(ROCM_PATH)/bin/hipify-perl
 HIPIFY_FLAGS := -quiet-warnings
 OFFLOAD_ARCH ?= gfx950
 
+# ── ROCm version ───────────────────────────────────────────────────────────
+# RCCL's device headers gate behaviour on ROCM_VERSION, which hipcc does NOT
+# predefine: RCCL's own CMake computes it from $(ROCM_PATH)/.info/version and
+# passes -DROCM_VERSION.  Consumers of those headers must do the same, or the
+# headers silently take their pre-7.0 fallbacks -- for warp-level coop syncs
+# that fallback is a whole-CTA __syncthreads(), which deadlocks any kernel that
+# calls ncclGin::waitSignal() from a subset of its waves.  Same arithmetic as
+# rccl/CMakeLists.txt: 10000*major + 100*minor + patch.
+ROCM_INFO_VERSION_FILE := $(firstword $(wildcard $(ROCM_PATH)/.info/version $(ROCM_PATH)/core/.info/version))
+ifneq ($(ROCM_INFO_VERSION_FILE),)
+    ROCM_VERSION_STRING := $(shell head -n1 $(ROCM_INFO_VERSION_FILE) | tr -d '[:space:]')
+    ROCM_MAJOR_VERSION := $(word 1,$(subst ., ,$(ROCM_VERSION_STRING)))
+    ROCM_MINOR_VERSION := $(word 2,$(subst ., ,$(ROCM_VERSION_STRING)))
+    ROCM_PATCH_VERSION := $(word 3,$(subst ., ,$(ROCM_VERSION_STRING)))
+    ROCM_VERSION ?= $(shell expr 10000 \* $(ROCM_MAJOR_VERSION) + 100 \* $(ROCM_MINOR_VERSION) + $(ROCM_PATCH_VERSION) 2>/dev/null)
+endif
+
 # ── RCCL dependency (device API headers + librccl) ─────────────────────────
 # Keep the upstream env-var name (NCCL_HOME) but point it at the RCCL build so
 # existing tooling/docs stay identical; RCCL_HOME is accepted as an alias.
@@ -72,6 +89,9 @@ $(error $(RCCL_HOME)/include/nccl_device.h not found. RCCL must be built from so
 endif
 ifeq ($(wildcard $(HIPCC)),)
 $(error hipcc not found at $(HIPCC). Set ROCM_PATH correctly.)
+endif
+ifeq ($(ROCM_VERSION),)
+$(error Could not determine ROCM_VERSION: no $(ROCM_PATH)/.info/version or $(ROCM_PATH)/core/.info/version. Pass ROCM_VERSION=<10000*major+100*minor+patch> explicitly.)
 endif
 endif
 
@@ -120,6 +140,7 @@ HIPFLAGS := $(CXXSTD) \
             --offload-arch=$(OFFLOAD_ARCH) \
             -D__HIP_PLATFORM_AMD__ \
             -DNCCL_OS_LINUX \
+            -DROCM_VERSION=$(ROCM_VERSION) \
             -fPIC -Wall -Wno-unused-result -O3 \
             $(INCLUDES)
 
@@ -139,6 +160,7 @@ endif
 HOSTFLAGS := $(CXXSTD) \
              -D__HIP_PLATFORM_AMD__ \
              -DNCCL_OS_LINUX \
+             -DROCM_VERSION=$(ROCM_VERSION) \
              -fPIC -Wall -Wno-unused-result -O3 \
              -isystem $(ROCM_PATH)/include \
              $(INCLUDES)
