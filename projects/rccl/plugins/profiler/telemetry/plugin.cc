@@ -15,11 +15,15 @@
 #include <time.h>
 #include "event.h"
 #include "print_event.h"
+#include <rocprofiler-sdk-roctx/roctx.h>
 
 #define __hidden __attribute__ ((visibility("hidden")))
 
 static int initialized;             // initialization counter for profiler
 static double startTime;            // profiler start time
+// When set (env RCCL_TELEMETRY_ROCTX=1), bracket each collective in a roctx
+// range so rocprofiler-sdk timestamps it on the GPU-kernel timeline/clock.
+static int roctxEnabled;
 
 static const int defaultEActivationMask = ncclProfileColl | ncclProfileP2p;
 static const int defaultGroupApiPoolSize = 256;
@@ -66,6 +70,8 @@ __hidden ncclResult_t exampleProfilerInit(void** context, uint64_t commId, int* 
     const char* str;
     str = getenv("NCCL_PROFILE_EVENT_MASK");
     __atomic_store_n(eActivationMask, str ? atoi(str) : 0, __ATOMIC_RELAXED);
+
+    roctxEnabled = (getenv("RCCL_TELEMETRY_ROCTX") != NULL);
 
     str = getenv("NCCL_PROFILE_GROUP_API_POOL_SIZE");
     groupApiPoolSize = str ? atoi(str) : defaultGroupApiPoolSize;
@@ -412,6 +418,18 @@ __hidden ncclResult_t exampleProfilerStartEvent(void* context, void** eHandle, n
     event->telWqeSent = 0;
     event->telWqeRcvd = 0;
 
+    // Bracket this collective with a roctx range so rocprofiler-sdk records it on
+    // the same timeline/clock as the GPU kernels. Name "<func>#<seq>" lets the
+    // post-processor join it 1:1 with our network telemetry by sequence number.
+    event->roctxRangeId = 0;
+    if (roctxEnabled) {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%s#%lu",
+               event->base.func ? event->base.func : "Coll",
+               (unsigned long)event->seqNumber);
+      event->roctxRangeId = roctxRangeStartA(buf);
+    }
+
     *eHandle = event;
     taskEventQueueEnqueue(parent, (struct taskEventBase *)event);
     // increment the group ref counter so the event will stay open
@@ -676,6 +694,7 @@ void updateEvent(void* handle) {
       event->base.stopTs = gettime() - startTime;
       // Per-collective telemetry was accumulated from child NetPlugin events; the
       // collective is now fully complete (all proxy/net children closed).
+      if (roctxEnabled && event->roctxRangeId) roctxRangeStop(event->roctxRangeId);
       debugEvent(event, "CollStop");
       updateEvent(event->base.parent);
       return;

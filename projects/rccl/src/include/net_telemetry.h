@@ -187,62 +187,6 @@ extern RcclDeviceStats rcclTelemetryDevs[RCCL_TELEMETRY_MAX_DEVS];
 extern int             rcclTelemetryNumDevs;
 
 /*
- * Thread-safe increment macros
- * These use atomic operations for thread safety
- */
-#define RCCL_TEL_INC(field) \
-  do { \
-    if (rcclTelemetryEnabled) \
-      __atomic_fetch_add(&(field), 1, __ATOMIC_RELAXED); \
-  } while(0)
-
-#define RCCL_TEL_ADD(field, val) \
-  do { \
-    if (rcclTelemetryEnabled) \
-      __atomic_fetch_add(&(field), (val), __ATOMIC_RELAXED); \
-  } while(0)
-
-#define RCCL_TEL_MIN(field, val) \
-  do { \
-    if (rcclTelemetryEnabled) { \
-      int64_t _cur = __atomic_load_n(&(field), __ATOMIC_RELAXED); \
-      int64_t _new = (val); \
-      while (_cur == 0 || _new < _cur) { \
-        if (__atomic_compare_exchange_n(&(field), &_cur, _new, \
-            1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) \
-          break; \
-      } \
-    } \
-  } while(0)
-
-#define RCCL_TEL_MAX(field, val) \
-  do { \
-    if (rcclTelemetryEnabled) { \
-      int64_t _cur = __atomic_load_n(&(field), __ATOMIC_RELAXED); \
-      int64_t _new = (val); \
-      while (_new > _cur) { \
-        if (__atomic_compare_exchange_n(&(field), &_cur, _new, \
-            1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) \
-          break; \
-      } \
-    } \
-  } while(0)
-
-#define RCCL_TEL_HIST(dev, ch, qp_idx, latency_ns) \
-  do { \
-    if (rcclTelemetryEnabled) { \
-      int _b = (int)((latency_ns) / rcclTelemetryCfg.histogram_bucket_interval_ns); \
-      if (_b >= rcclTelemetryCfg.histogram_max_buckets) \
-        _b = rcclTelemetryCfg.histogram_max_buckets - 1; \
-      if (_b < 0) _b = 0; \
-      if (_b < RCCL_TELEMETRY_HISTOGRAM_SIZE) \
-        __atomic_fetch_add( \
-          &rcclTelemetryDevs[dev].channels[ch].qp[qp_idx].wqe_completion_histogram[_b], \
-          1, __ATOMIC_RELAXED); \
-    } \
-  } while(0)
-
-/*
  * Helper to register a device for telemetry collection
  * Returns the device index or -1 on failure
  */
@@ -294,60 +238,19 @@ static inline int64_t rcclTelemetryGetNs(void) {
 }
 
 /**
- * Record latency for a WQE completion (histogram, min, max).
- */
-static inline void rcclTelemetryRecordLatency(int devIdx, int chIdx, int qpIdx, int64_t latency_ns) {
-  if (!rcclTelemetryEnabled || devIdx < 0 || devIdx >= RCCL_TELEMETRY_MAX_DEVS ||
-      chIdx < 0 || chIdx >= RCCL_TELEMETRY_MAX_CHANNELS ||
-      qpIdx < 0 || qpIdx >= RCCL_TELEMETRY_MAX_QPS || latency_ns <= 0) {
-    return;
-  }
-  RcclQpStats* qp = &rcclTelemetryDevs[devIdx].channels[chIdx].qp[qpIdx];
-  
-  int bucket = (int)(latency_ns / rcclTelemetryCfg.histogram_bucket_interval_ns);
-  if (bucket >= rcclTelemetryCfg.histogram_max_buckets)
-    bucket = rcclTelemetryCfg.histogram_max_buckets - 1;
-  if (bucket < 0) bucket = 0;
-  if (bucket < RCCL_TELEMETRY_HISTOGRAM_SIZE)
-    __atomic_fetch_add(&qp->wqe_completion_histogram[bucket], 1, __ATOMIC_RELAXED);
-  
-  int64_t cur_min = __atomic_load_n(&qp->wqe_completion_ns_min, __ATOMIC_RELAXED);
-  while (cur_min == 0 || latency_ns < cur_min) {
-    if (__atomic_compare_exchange_n(&qp->wqe_completion_ns_min, &cur_min, latency_ns,
-                                    1, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-      break;
-  }
-  
-  int64_t cur_max = __atomic_load_n(&qp->wqe_completion_ns_max, __ATOMIC_RELAXED);
-  while (latency_ns > cur_max) {
-    if (__atomic_compare_exchange_n(&qp->wqe_completion_ns_max, &cur_max, latency_ns,
-                                    1, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-      break;
-  }
-}
-
-/**
- * Record a send operation completion.
- * Call after ibv_post_send succeeds.
+ * Record transferred bytes on a device.
+ * Call after ibv_post_send succeeds (isSend=1) or when receive data is
+ * available (isSend=0).
  *
  * @param devIdx   Device index in rcclTelemetryDevs array
- * @param bytes    Number of bytes sent
+ * @param isSend   1 to add to tx_bytes, 0 to add to rx_bytes
+ * @param bytes    Number of bytes transferred
  */
-static inline void rcclTelemetrySendPosted(int devIdx, uint64_t bytes) {
+static inline void rcclTelemetryBytes(int devIdx, int isSend, uint64_t bytes) {
   if (!rcclTelemetryEnabled || devIdx < 0) return;
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].tx_bytes, bytes, __ATOMIC_RELAXED);
-}
-
-/**
- * Record a receive operation completion.
- * Call when receive data is available.
- *
- * @param devIdx   Device index in rcclTelemetryDevs array
- * @param bytes    Number of bytes received
- */
-static inline void rcclTelemetryRecvPosted(int devIdx, uint64_t bytes) {
-  if (!rcclTelemetryEnabled || devIdx < 0) return;
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].rx_bytes, bytes, __ATOMIC_RELAXED);
+  uint64_t* field = isSend ? &rcclTelemetryDevs[devIdx].tx_bytes
+                           : &rcclTelemetryDevs[devIdx].rx_bytes;
+  __atomic_fetch_add(field, bytes, __ATOMIC_RELAXED);
 }
 
 /**
@@ -413,52 +316,24 @@ static inline void rcclTelemetryWqeComplete(int devIdx, int chIdx, int qpIdx, in
 }
 
 /**
- * Increment channel-level WQE sent counter.
+ * Increment channel- and QP-level WQE sent (isSend=1) or received (isSend=0)
+ * counters. Call after ibv_post_send / ibv_post_recv.
  *
  * @param devIdx   Device index
  * @param chIdx    Channel index
  * @param qpIdx    QP index within channel
+ * @param isSend   1 for send, 0 for recv
  */
-static inline void rcclTelemetryWqeSent(int devIdx, int chIdx, int qpIdx) {
+static inline void rcclTelemetryWqePosted(int devIdx, int chIdx, int qpIdx, int isSend) {
   if (!rcclTelemetryEnabled || devIdx < 0) return;
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].channels[chIdx].qp[qpIdx].num_wqe_sent, 1, __ATOMIC_RELAXED);
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].channels[chIdx].num_wqe_sent, 1, __ATOMIC_RELAXED);
-}
-
-/**
- * Increment channel-level WQE received counter.
- *
- * @param devIdx   Device index
- * @param chIdx    Channel index
- * @param qpIdx    QP index within channel
- */
-static inline void rcclTelemetryWqeRecvd(int devIdx, int chIdx, int qpIdx) {
-  if (!rcclTelemetryEnabled || devIdx < 0) return;
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].channels[chIdx].qp[qpIdx].num_wqe_rcvd, 1, __ATOMIC_RELAXED);
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].channels[chIdx].num_wqe_rcvd, 1, __ATOMIC_RELAXED);
-}
-
-/**
- * Increment slot miss counter (buffer unavailable at post time).
- *
- * @param devIdx   Device index
- * @param chIdx    Channel index
- * @param qpIdx    QP index
- */
-static inline void rcclTelemetrySlotMiss(int devIdx, int chIdx, int qpIdx) {
-  if (!rcclTelemetryEnabled || devIdx < 0) return;
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].channels[chIdx].qp[qpIdx].num_slot_miss, 1, __ATOMIC_RELAXED);
-}
-
-/**
- * Increment CTS sent counter.
- *
- * @param devIdx   Device index
- * @param chIdx    Channel index
- */
-static inline void rcclTelemetryCtsSent(int devIdx, int chIdx) {
-  if (!rcclTelemetryEnabled || devIdx < 0) return;
-  __atomic_fetch_add(&rcclTelemetryDevs[devIdx].channels[chIdx].num_cts_sent, 1, __ATOMIC_RELAXED);
+  RcclChannelStats* ch = &rcclTelemetryDevs[devIdx].channels[chIdx];
+  if (isSend) {
+    __atomic_fetch_add(&ch->qp[qpIdx].num_wqe_sent, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&ch->num_wqe_sent, 1, __ATOMIC_RELAXED);
+  } else {
+    __atomic_fetch_add(&ch->qp[qpIdx].num_wqe_rcvd, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&ch->num_wqe_rcvd, 1, __ATOMIC_RELAXED);
+  }
 }
 
 /**
@@ -531,37 +406,6 @@ static inline int rcclTelemetrySetupChannel(int devIdx, int chIdx, int numQps, i
   }
   
   return startSlot;
-}
-
-/**
- * Track WQE post with timestamp capture.
- * Call immediately after ibv_post_send/ibv_post_recv.
- * Returns timestamp for later latency calculation.
- *
- * @param devIdx   Device index
- * @param chIdx    Channel index
- * @param qpSlot   QP slot index (from telQpSlot)
- * @param isSend   true for send, false for recv
- * @return         Current timestamp in nanoseconds (for passing to rcclTelemetryWqeComplete)
- */
-static inline int64_t rcclTelemetryTrackWqePost(int devIdx, int chIdx, int qpSlot, int isSend) {
-  if (!rcclTelemetryEnabled || devIdx < 0 || devIdx >= RCCL_TELEMETRY_MAX_DEVS ||
-      chIdx < 0 || chIdx >= RCCL_TELEMETRY_MAX_CHANNELS ||
-      qpSlot < 0 || qpSlot >= RCCL_TELEMETRY_MAX_QPS) {
-    return 0;
-  }
-  
-  RcclChannelStats* ch = &rcclTelemetryDevs[devIdx].channels[chIdx];
-  
-  if (isSend) {
-    __atomic_fetch_add(&ch->num_wqe_sent, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&ch->qp[qpSlot].num_wqe_sent, 1, __ATOMIC_RELAXED);
-  } else {
-    __atomic_fetch_add(&ch->num_wqe_rcvd, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&ch->qp[qpSlot].num_wqe_rcvd, 1, __ATOMIC_RELAXED);
-  }
-  
-  return rcclTelemetryGetNs();
 }
 
 #ifdef __cplusplus

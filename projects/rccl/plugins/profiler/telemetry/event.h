@@ -148,6 +148,12 @@ struct collective {
   uint64_t telRxBytes;   // sum of WQE lengths on recv QPs
   uint64_t telWqeSent;   // number of send WQEs (net events) posted
   uint64_t telWqeRcvd;   // number of recv WQEs (net events) posted
+
+  // roctx range id for this collective (0 = none). When RCCL_TELEMETRY_ROCTX is
+  // set, the plugin brackets each collective with a roctx range named
+  // "<func>#<seq>", so rocprofiler-sdk records it on the SAME timeline/clock as
+  // the GPU kernels -> exact slice-to-slice GPU<->network correlation.
+  uint64_t roctxRangeId;
 };
 
 struct p2p {

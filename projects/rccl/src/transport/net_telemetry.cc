@@ -229,10 +229,24 @@ static int rcclTelemetryIsCounterEnabled(const char* counter_name);
 static void rcclTelemetryGetTimestamp(char* buf, size_t size);
 static void rcclTelemetryWriteJson(FILE* fp);
 static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev);
-static void rcclTelemetryCollectDebugfs(RcclDeviceStats* dev,
+static void rcclTelemetryCollectDebugfs(int64_t* hwc,
+                                         const char* roce_device,
                                          const char* driver_name,
                                          const RcclDebugfsWanted* wanted,
                                          int num_wanted);
+
+/*
+ * Read every configured HW counter for `dev` (IB sysfs + batched ethtool +
+ * debugfs, plus the four tx/rx byte/packet delta sources) into caller-provided
+ * buffers. All outputs are reset to -1 first, so entries that cannot be read
+ * stay N/A. Used for both the baseline snapshot (writes snap_init_*) and the
+ * current sample (writes the live arrays), which differ only by target buffer.
+ */
+static void rcclTelemetryReadCounters(RcclDeviceStats* dev, int64_t* hwc,
+                                      int64_t* pfc_rx_frames, int64_t* pfc_tx_frames,
+                                      int64_t* pfc_rx_pause_us, int64_t* pfc_tx_pause_us,
+                                      int64_t* tx_bytes, int64_t* rx_bytes,
+                                      int64_t* tx_packets, int64_t* rx_packets);
 
 /* ------------------------------------------------------------------ */
 /* Unified batched ethtool reader                                     */
@@ -401,6 +415,26 @@ void rcclTelemetryFlush(void) {
 
   for (int i = 0; i < rcclTelemetryNumDevs; i++) {
     rcclTelemetryCollectHwCounters(&rcclTelemetryDevs[i]);
+  }
+
+  if (getenv("RCCL_TELEMETRY_DEBUG") != NULL) {
+    fprintf(stderr, "RCCL NET_TELEMETRY: flush pid=%d numDevs=%d\n",
+            (int)getpid(), rcclTelemetryNumDevs);
+    for (int i = 0; i < rcclTelemetryNumDevs; i++) {
+      RcclDeviceStats* d = &rcclTelemetryDevs[i];
+      uint64_t wqe_sent = 0, wqe_rcvd = 0, wqe_comp = 0;
+      for (int c = 0; c < d->num_channels && c < RCCL_TELEMETRY_MAX_CHANNELS; c++) {
+        wqe_sent += d->channels[c].num_wqe_sent;
+        wqe_rcvd += d->channels[c].num_wqe_rcvd;
+        wqe_comp += d->channels[c].num_wqe_completed;
+      }
+      fprintf(stderr, "RCCL NET_TELEMETRY:   dev[%d] roce=%s eth=%s chans=%d "
+              "tx=%lu rx=%lu wqe_sent=%lu wqe_rcvd=%lu wqe_comp=%lu cq_err=%lu\n",
+              i, d->roce_device, d->eth_device, d->num_channels,
+              (unsigned long)d->tx_bytes, (unsigned long)d->rx_bytes,
+              (unsigned long)wqe_sent, (unsigned long)wqe_rcvd,
+              (unsigned long)wqe_comp, (unsigned long)d->num_cq_errors);
+    }
   }
 
   char hostname[256];
@@ -585,6 +619,12 @@ int rcclTelemetryRegisterDevice(int device_id, const char* roce_device,
     return -1;
   }
 
+  if (getenv("RCCL_TELEMETRY_DEBUG") != NULL) {
+    fprintf(stderr, "RCCL NET_TELEMETRY: RegisterDevice idx=%d id=%d roce=%s eth=%s transport=%s\n",
+            idx, device_id, roce_device ? roce_device : "(null)",
+            eth_device ? eth_device : "(null)", transport ? transport : "(null)");
+  }
+
   RcclDeviceStats* dev = &rcclTelemetryDevs[idx];
   dev->device_id = device_id;
 
@@ -648,24 +688,38 @@ static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev) {
     return;
   }
 
-  /* Reset every baseline to -1 so counters that fail to read here stay N/A
-   * and produce a -1 delta at flush rather than a spurious value. */
-  dev->snap_init_tx_bytes = -1;
-  dev->snap_init_rx_bytes = -1;
-  dev->snap_init_tx_packets = -1;
-  dev->snap_init_rx_packets = -1;
-  for (int c = 0; c < RCCL_TELEMETRY_MAX_HWC; c++)
-    dev->snap_init_hw_counters[c] = -1;
-  for (int p = 0; p < 8; p++) {
-    dev->snap_init_pfc_rx_frames[p]   = -1;
-    dev->snap_init_pfc_tx_frames[p]   = -1;
-    dev->snap_init_pfc_rx_pause_us[p] = -1;
-    dev->snap_init_pfc_tx_pause_us[p] = -1;
-  }
+  /* Capture the current absolute values as the baseline. ReadCounters resets
+   * every target to -1 first, so counters that fail to read stay N/A and
+   * produce a -1 delta at flush rather than a spurious value. */
+  rcclTelemetryReadCounters(dev, dev->snap_init_hw_counters,
+                            dev->snap_init_pfc_rx_frames, dev->snap_init_pfc_tx_frames,
+                            dev->snap_init_pfc_rx_pause_us, dev->snap_init_pfc_tx_pause_us,
+                            &dev->snap_init_tx_bytes, &dev->snap_init_rx_bytes,
+                            &dev->snap_init_tx_packets, &dev->snap_init_rx_packets);
+}
 
+/*
+ * Shared HW-counter reader used for both the baseline snapshot and the current
+ * sample. Fills the caller's buffers from IB sysfs, a single batched ethtool
+ * pass, and debugfs. Every output is reset to -1 up front so unread counters
+ * stay N/A (and so the ethtool "skip if already found" dedup works on repeated
+ * snapshots instead of seeing a stale delta from a previous flush).
+ */
+static void rcclTelemetryReadCounters(RcclDeviceStats* dev, int64_t* hwc,
+                                      int64_t* pfc_rx_frames, int64_t* pfc_tx_frames,
+                                      int64_t* pfc_rx_pause_us, int64_t* pfc_tx_pause_us,
+                                      int64_t* tx_bytes, int64_t* rx_bytes,
+                                      int64_t* tx_packets, int64_t* rx_packets) {
+  if (dev->roce_device[0] == '\0' || dev->hw_config == NULL) return;
   const RcclHwConfig* hw = (const RcclHwConfig*)dev->hw_config;
 
-  /* 1. IB sysfs hw_counters baselines (individual reads, with fallback key). */
+  for (int c = 0; c < RCCL_TELEMETRY_MAX_HWC; c++) hwc[c] = -1;
+  int64_t* pfc_out[4] = { pfc_rx_frames, pfc_tx_frames, pfc_rx_pause_us, pfc_tx_pause_us };
+  for (int k = 0; k < 4; k++)
+    for (int p = 0; p < 8; p++) pfc_out[k][p] = -1;
+  *tx_bytes = *rx_bytes = *tx_packets = *rx_packets = -1;
+
+  /* 1. IB sysfs hw_counters (individual reads, with fallback key). */
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
     if (d->source == HWC_IB_SYSFS && d->key != NULL &&
@@ -673,75 +727,59 @@ static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev) {
       int64_t v = rcclTelemetryReadHwCounter(dev->roce_device, d->key);
       if (v < 0 && d->key_fallback != NULL)
         v = rcclTelemetryReadHwCounter(dev->roce_device, d->key_fallback);
-      dev->snap_init_hw_counters[c] = v;
+      hwc[c] = v;
     }
   }
 
-  /* 2. Batched ethtool baselines: scalar hw_counters + PFC per-priority +
-   *    the existing 4-way tx/rx bytes/packets snapshot. */
+  /* 2. Batched ethtool: scalar hw_counters + PFC per-priority + the 4-way
+   *    tx/rx bytes/packets sources. Both primary and fallback keys are queued
+   *    with the same target; the batch reader skips targets already >= 0. */
   RcclEthtoolWantedEx ew[RCCL_ETHTOOL_MAX_WANTED];
   int ew_n = 0;
-
-  /* 2a. Scalar ETHTOOL-sourced hw_counters (with optional fallback key). */
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
     if (d->source != HWC_ETHTOOL || d->key == NULL) continue;
     if (!rcclTelemetryIsCounterEnabled(d->json_name)) continue;
-
     if (ew_n < RCCL_ETHTOOL_MAX_WANTED) {
       strncpy(ew[ew_n].key, d->key, 63); ew[ew_n].key[63] = '\0';
-      ew[ew_n].target = &dev->snap_init_hw_counters[c];
-      ew_n++;
+      ew[ew_n].target = &hwc[c]; ew_n++;
     }
     if (d->key_fallback != NULL && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
       strncpy(ew[ew_n].key, d->key_fallback, 63); ew[ew_n].key[63] = '\0';
-      ew[ew_n].target = &dev->snap_init_hw_counters[c];
-      ew_n++;
+      ew[ew_n].target = &hwc[c]; ew_n++;
     }
   }
 
-  /* 2b. PFC per-priority baselines. */
   const RcclPfcPatterns* pfc = &hw->pfc;
-  for (int pri = 0; pri < 8 && ew_n < RCCL_ETHTOOL_MAX_WANTED - 4; pri++) {
-    if (pfc->rx_frames_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->rx_frames_fmt, pri);
-      ew[ew_n].target = &dev->snap_init_pfc_rx_frames[pri]; ew_n++;
-    }
-    if (pfc->tx_frames_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->tx_frames_fmt, pri);
-      ew[ew_n].target = &dev->snap_init_pfc_tx_frames[pri]; ew_n++;
-    }
-    if (pfc->rx_pause_us_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->rx_pause_us_fmt, pri);
-      ew[ew_n].target = &dev->snap_init_pfc_rx_pause_us[pri]; ew_n++;
-    }
-    if (pfc->tx_pause_us_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->tx_pause_us_fmt, pri);
-      ew[ew_n].target = &dev->snap_init_pfc_tx_pause_us[pri]; ew_n++;
+  const char* pfc_fmt[4] = { pfc->rx_frames_fmt, pfc->tx_frames_fmt,
+                             pfc->rx_pause_us_fmt, pfc->tx_pause_us_fmt };
+  for (int pri = 0; pri < 8; pri++) {
+    for (int k = 0; k < 4; k++) {
+      if (pfc_fmt[k] && ew_n < RCCL_ETHTOOL_MAX_WANTED - 4) {
+        snprintf(ew[ew_n].key, 64, pfc_fmt[k], pri);
+        ew[ew_n].target = &pfc_out[k][pri]; ew_n++;
+      }
     }
   }
 
-  /* 2c. 4-way tx/rx bytes/packets snapshot (routed via dp->source). */
   const RcclDeltaPatterns* dp = &hw->delta;
   if (dp->source == HWC_ETHTOOL && ew_n + 4 <= RCCL_ETHTOOL_MAX_WANTED) {
-    snprintf(ew[ew_n].key, 64, "%s", dp->tx_bytes);   ew[ew_n].target = &dev->snap_init_tx_bytes;   ew_n++;
-    snprintf(ew[ew_n].key, 64, "%s", dp->rx_bytes);   ew[ew_n].target = &dev->snap_init_rx_bytes;   ew_n++;
-    snprintf(ew[ew_n].key, 64, "%s", dp->tx_packets); ew[ew_n].target = &dev->snap_init_tx_packets; ew_n++;
-    snprintf(ew[ew_n].key, 64, "%s", dp->rx_packets); ew[ew_n].target = &dev->snap_init_rx_packets; ew_n++;
+    snprintf(ew[ew_n].key, 64, "%s", dp->tx_bytes);   ew[ew_n].target = tx_bytes;   ew_n++;
+    snprintf(ew[ew_n].key, 64, "%s", dp->rx_bytes);   ew[ew_n].target = rx_bytes;   ew_n++;
+    snprintf(ew[ew_n].key, 64, "%s", dp->tx_packets); ew[ew_n].target = tx_packets; ew_n++;
+    snprintf(ew[ew_n].key, 64, "%s", dp->rx_packets); ew[ew_n].target = rx_packets; ew_n++;
   }
 
   rcclTelemetryCollectEthtoolBatch(dev->eth_device, ew, ew_n);
 
   if (dp->source == HWC_IB_SYSFS) {
-    dev->snap_init_tx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_bytes);
-    dev->snap_init_rx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_bytes);
-    dev->snap_init_tx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_packets);
-    dev->snap_init_rx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_packets);
+    *tx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_bytes);
+    *rx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_bytes);
+    *tx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_packets);
+    *rx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_packets);
   }
 
-  /* 3. Debugfs hw_counters baselines. CollectDebugfs writes into hw_counters[],
-   *    so we temporarily stash current hw_counters[] values, let it populate
-   *    the baselines, copy to snap_init_hw_counters[], and restore hw_counters[]. */
+  /* 3. Debugfs counters (single file read, writes into hwc directly). */
   RcclDebugfsWanted debugfs_list[RCCL_TELEMETRY_MAX_HWC];
   int debugfs_count = 0;
   for (int c = 0; c < hw->num_counters; c++) {
@@ -754,20 +792,9 @@ static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev) {
     }
   }
   if (debugfs_count > 0) {
-    int64_t saved[RCCL_TELEMETRY_MAX_HWC];
-    for (int i = 0; i < debugfs_count; i++) {
-      int idx = debugfs_list[i].counter_idx;
-      saved[i] = dev->hw_counters[idx];
-      dev->hw_counters[idx] = -1;
-    }
     char driver_name[64];
     rcclTelemetryGetDriverName(dev->roce_device, driver_name, sizeof(driver_name));
-    rcclTelemetryCollectDebugfs(dev, driver_name, debugfs_list, debugfs_count);
-    for (int i = 0; i < debugfs_count; i++) {
-      int idx = debugfs_list[i].counter_idx;
-      dev->snap_init_hw_counters[idx] = dev->hw_counters[idx];
-      dev->hw_counters[idx] = saved[i];
-    }
+    rcclTelemetryCollectDebugfs(hwc, dev->roce_device, driver_name, debugfs_list, debugfs_count);
   }
 }
 
@@ -857,7 +884,8 @@ static int64_t rcclTelemetryReadHwCounter(const char* roce_device, const char* c
 /* Batched debugfs reader                                             */
 /* ------------------------------------------------------------------ */
 
-static void rcclTelemetryCollectDebugfs(RcclDeviceStats* dev,
+static void rcclTelemetryCollectDebugfs(int64_t* hwc,
+                                         const char* roce_device,
                                          const char* driver_name,
                                          const RcclDebugfsWanted* wanted,
                                          int num_wanted) {
@@ -865,7 +893,7 @@ static void rcclTelemetryCollectDebugfs(RcclDeviceStats* dev,
 
   char path[512];
   snprintf(path, sizeof(path), "/sys/kernel/debug/%s/%s/info",
-           driver_name, dev->roce_device);
+           driver_name, roce_device);
 
   FILE* fp = fopen(path, "r");
   if (fp == NULL) return;
@@ -874,7 +902,7 @@ static void rcclTelemetryCollectDebugfs(RcclDeviceStats* dev,
   char line[256];
   while (fgets(line, sizeof(line), fp) != NULL && found < num_wanted) {
     for (int i = 0; i < num_wanted; i++) {
-      if (dev->hw_counters[wanted[i].counter_idx] >= 0) continue;
+      if (hwc[wanted[i].counter_idx] >= 0) continue;
 
       const char* key = wanted[i].key;
       char* p = strstr(line, key);
@@ -882,7 +910,7 @@ static void rcclTelemetryCollectDebugfs(RcclDeviceStats* dev,
         p += strlen(key);
         while (*p == ' ' || *p == ':' || *p == '=') p++;
         if (*p != '\0') {
-          dev->hw_counters[wanted[i].counter_idx] = strtoll(p, NULL, 10);
+          hwc[wanted[i].counter_idx] = strtoll(p, NULL, 10);
           found++;
         }
       }
@@ -901,98 +929,13 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
 
   const RcclHwConfig* hw = (const RcclHwConfig*)dev->hw_config;
 
-  /* 1. IB sysfs hw_counters (individual reads).
-   *    If the primary key read returns -1 (N/A) and a fallback key is
-   *    provided, try that too — lets us track counters whose kernel-side
-   *    name changed across firmware/driver revisions. */
-  for (int c = 0; c < hw->num_counters; c++) {
-    const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source == HWC_IB_SYSFS && d->key != NULL) {
-      if (rcclTelemetryIsCounterEnabled(d->json_name)) {
-        int64_t v = rcclTelemetryReadHwCounter(dev->roce_device, d->key);
-        if (v < 0 && d->key_fallback != NULL)
-          v = rcclTelemetryReadHwCounter(dev->roce_device, d->key_fallback);
-        dev->hw_counters[c] = v;
-      }
-    }
-  }
-
-  /* 2. Build batched ethtool wanted list: scalar + PFC per-priority + deltas */
-  RcclEthtoolWantedEx ew[RCCL_ETHTOOL_MAX_WANTED];
-  int ew_n = 0;
-
-  /* 2a. Scalar hw_counters that use ETHTOOL.
-   *     Both the primary key and (if set) the fallback key are queued
-   *     with the same target pointer. The batch reader skips entries
-   *     whose target is already >= 0, so if the primary matches first
-   *     the fallback lookup is naturally short-circuited. */
-  for (int c = 0; c < hw->num_counters; c++) {
-    const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source != HWC_ETHTOOL || d->key == NULL) continue;
-    if (!rcclTelemetryIsCounterEnabled(d->json_name)) continue;
-
-    if (ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      strncpy(ew[ew_n].key, d->key, 63);
-      ew[ew_n].key[63] = '\0';
-      ew[ew_n].target = &dev->hw_counters[c];
-      ew_n++;
-    }
-    if (d->key_fallback != NULL && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      strncpy(ew[ew_n].key, d->key_fallback, 63);
-      ew[ew_n].key[63] = '\0';
-      ew[ew_n].target = &dev->hw_counters[c];
-      ew_n++;
-    }
-  }
-
-  /* 2b. PFC per-priority counters */
-  const RcclPfcPatterns* pfc = &hw->pfc;
-  for (int pri = 0; pri < 8 && ew_n < RCCL_ETHTOOL_MAX_WANTED - 4; pri++) {
-    if (pfc->rx_frames_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->rx_frames_fmt, pri);
-      ew[ew_n].target = &dev->pfc_rx_frames[pri];
-      ew_n++;
-    }
-    if (pfc->tx_frames_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->tx_frames_fmt, pri);
-      ew[ew_n].target = &dev->pfc_tx_frames[pri];
-      ew_n++;
-    }
-    if (pfc->rx_pause_us_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->rx_pause_us_fmt, pri);
-      ew[ew_n].target = &dev->pfc_rx_pause_us[pri];
-      ew_n++;
-    }
-    if (pfc->tx_pause_us_fmt && ew_n < RCCL_ETHTOOL_MAX_WANTED) {
-      snprintf(ew[ew_n].key, 64, pfc->tx_pause_us_fmt, pri);
-      ew[ew_n].target = &dev->pfc_tx_pause_us[pri];
-      ew_n++;
-    }
-  }
-
-  /* 2c. Delta snapshot current-values (stored locally, deltas computed after).
-   *     Routed via dp->source: ETHTOOL queues on the batch below, IB_SYSFS
-   *     reads directly after the batch flushes. */
-  int64_t cur_tx_bytes = -1, cur_rx_bytes = -1;
-  int64_t cur_tx_packets = -1, cur_rx_packets = -1;
-  const RcclDeltaPatterns* dp = &hw->delta;
-
-  if (dp->source == HWC_ETHTOOL && ew_n + 4 <= RCCL_ETHTOOL_MAX_WANTED) {
-    snprintf(ew[ew_n].key, 64, "%s", dp->tx_bytes);   ew[ew_n].target = &cur_tx_bytes;   ew_n++;
-    snprintf(ew[ew_n].key, 64, "%s", dp->rx_bytes);   ew[ew_n].target = &cur_rx_bytes;   ew_n++;
-    snprintf(ew[ew_n].key, 64, "%s", dp->tx_packets); ew[ew_n].target = &cur_tx_packets; ew_n++;
-    snprintf(ew[ew_n].key, 64, "%s", dp->rx_packets); ew[ew_n].target = &cur_rx_packets; ew_n++;
-  }
-
-  /* Single ethtool pass for all wanted entries */
-  rcclTelemetryCollectEthtoolBatch(dev->eth_device, ew, ew_n);
-
-  if (dp->source == HWC_IB_SYSFS) {
-    cur_tx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_bytes);
-    cur_rx_bytes   = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_bytes);
-    cur_tx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->tx_packets);
-    cur_rx_packets = rcclTelemetryReadHwCounter(dev->roce_device, dp->rx_packets);
-  }
+  /* 1-3. Read the current absolute values into the live arrays. */
+  int64_t cur_tx_bytes, cur_rx_bytes, cur_tx_packets, cur_rx_packets;
+  rcclTelemetryReadCounters(dev, dev->hw_counters,
+                            dev->pfc_rx_frames, dev->pfc_tx_frames,
+                            dev->pfc_rx_pause_us, dev->pfc_tx_pause_us,
+                            &cur_tx_bytes, &cur_rx_bytes,
+                            &cur_tx_packets, &cur_rx_packets);
 
   /* Compute deltas: snap_init < 0 means snapshot was never taken -> delta = -1 */
   dev->delta_tx_bytes   = (dev->snap_init_tx_bytes   >= 0 && cur_tx_bytes   >= 0)
@@ -1003,22 +946,6 @@ static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev) {
                           ? cur_tx_packets - dev->snap_init_tx_packets : -1;
   dev->delta_rx_packets = (dev->snap_init_rx_packets >= 0 && cur_rx_packets >= 0)
                           ? cur_rx_packets - dev->snap_init_rx_packets : -1;
-
-  /* 3. Debugfs counters (single file read) */
-  RcclDebugfsWanted debugfs_list[RCCL_TELEMETRY_MAX_HWC];
-  int debugfs_count = 0;
-  for (int c = 0; c < hw->num_counters; c++) {
-    const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source == HWC_DEBUGFS && d->key != NULL &&
-        rcclTelemetryIsCounterEnabled(d->json_name)) {
-      debugfs_list[debugfs_count].key = d->key;
-      debugfs_list[debugfs_count].counter_idx = c;
-      debugfs_count++;
-    }
-  }
-  char driver_name[64];
-  rcclTelemetryGetDriverName(dev->roce_device, driver_name, sizeof(driver_name));
-  rcclTelemetryCollectDebugfs(dev, driver_name, debugfs_list, debugfs_count);
 
   /* 4. Transform absolute hw_counters/pfc_* values into deltas vs. the
    *    baseline captured by rcclTelemetrySnapshotInit. If either end of the

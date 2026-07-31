@@ -312,7 +312,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
     NCCLCHECK(wrap_ibv_post_send(qp->qp, comm->wrs, &bad_wr));
 
     if (qp->telQpSlot >= 0)
-      rcclTelemetryWqeSent(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
+      rcclTelemetryWqePosted(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot, 1);
 
     // Update the send offset and addresses for the next QP according to the
     // actual data size that was sent on the current QP, for every request
@@ -490,7 +490,7 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
     TIME_START(0);
     NCCLCHECK(IbCastMultiSend(comm, slot, nqps, startQpIndex, wrrSched, useWriteOp));
 
-    rcclTelemetrySendPosted(comm->base.vProps.devs[0], (uint64_t)size);
+    rcclTelemetryBytes(comm->base.vProps.devs[0], 1, (uint64_t)size);
 
     comm->base.fifoHead++;
     TIME_STOP(0);
@@ -639,13 +639,13 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
           NCCLCHECK(IbCastPostRecvWorkRequest(qp->qp, &comm->ibRecvWorkRequest));
           comm->base.rxPosts[qpIndex]++;
           if (qp->telQpSlot >= 0)
-            rcclTelemetryWqeRecvd(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
+            rcclTelemetryWqePosted(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot, 0);
         }
       } else {
         comm->ibRecvWorkRequest.wr_id = req - comm->base.reqs;
         NCCLCHECK(IbCastPostRecvWorkRequest(qp->qp, &comm->ibRecvWorkRequest));
         if (qp->telQpSlot >= 0)
-          rcclTelemetryWqeRecvd(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot);
+          rcclTelemetryWqePosted(comm->base.vProps.devs[qp->devIndex], comm->telChId, qp->telQpSlot, 0);
       }
 #ifdef NCCL_ENABLE_NET_PROFILING
       // Start a QP event for every request in the multirecv and every qp
@@ -837,7 +837,7 @@ static inline ncclResult_t IbCastRequestComplete(struct ncclIbRequest* r, int* d
     for (int i = 0; i < r->nreqs; i++) {
       sizes[i] = sizesToReport[i];
       if (r->devBases[0])
-        rcclTelemetryRecvPosted(r->devBases[0]->ibDevN, (uint64_t)sizes[i]);
+        rcclTelemetryBytes(r->devBases[0]->ibDevN, 0, (uint64_t)sizes[i]);
 #ifdef NCCL_ENABLE_NET_PROFILING
       for (int j = 0; j < r->pInfo[i].nEventHandles; j++) {
         NCCLCHECK(IbCastProfilerFunction(&r->pInfo[i].qpEventHandles[j], ncclProfilerNetEventStop, NULL, 0, NULL));

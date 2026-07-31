@@ -12,6 +12,12 @@ target_include_directories(nccl-profiler-telemetry PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/nccl
 )
 
+# roctx: emit a range per collective so rocprofiler-sdk records collectives on
+# the GPU-kernel timeline (enables exact GPU<->network correlation).
+target_link_libraries(nccl-profiler-telemetry PRIVATE
+    ${ROCM_PATH}/lib/librocprofiler-sdk-roctx.so
+)
+
 set_target_properties(nccl-profiler-telemetry PROPERTIES
     OUTPUT_NAME "nccl-profiler-telemetry"
     PREFIX "lib"
