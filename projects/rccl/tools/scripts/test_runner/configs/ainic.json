@@ -221,6 +221,23 @@
       ]
     },
 
+    "a_device_find_window": {
+      "is_gtest": true,
+      "binary": "rccl-UnitTestsFixtures",
+      "num_ranks": 1,
+      "num_nodes": 1,
+      "num_gpus": 2,
+      "timeout": 120,
+      "description": "A16: device-side symmetric window lookup (ncclFindWindow). A kernel resolves the registered symmetric window for a local pointer from the device-side window registry (no host round-trip) and reads a peer's value through it. Single node, 2 GPUs with direct P2P; skips if symmetric memory is unsupported.",
+      "tests": [
+        {
+          "name": "A16_DeviceApi_FindWindowRemoteRead",
+          "description": "In-kernel ncclFindWindow resolves the peer's symmetric window from a local user pointer and reads its value; validates the device-side window registry.",
+          "test_filter": "DeviceApi.FindWindowRemoteRead"
+        }
+      ]
+    },
+
     "b_base": {
       "description": "Sweep base: derived suites run the full 1024-16G range for both allreduce and alltoall. Sets NO shared env_variables so each sweep runs against stock defaults plus its own per-suite knobs, and NO group-level command_args by design - every test sets its own explicit, complete command_args so nothing is silently concatenated/duplicated.",
       "is_gtest": false,
@@ -430,6 +447,7 @@
     { "name": "A9-A13. Component - GIN proxy",        "config": "a_gin",             "enabled": true },
     { "name": "A14. GIN enable gate (ROCM-27070)",    "config": "a_gin_enable_gate", "enabled": true },
     { "name": "A15. GIN AINIC backend (ROCM-27070)",  "config": "a_gin_ainic_backend", "enabled": true },
+    { "name": "A16. Device API - Find window (AICOMRCCL-1173)", "config": "a_device_find_window", "enabled": true },
 
     { "name": "B1. IB baseline",                     "config": "b1_ib",             "enabled": true },
     { "name": "B2. CAST alltoall full (1K-16G)",     "config": "b_alltoall_cast_full", "enabled": true },
