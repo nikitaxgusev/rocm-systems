@@ -32,6 +32,36 @@ static char rcclTelemetryProcessName[256];
 static pthread_mutex_t rcclTelemetrySnapshotMutex = PTHREAD_MUTEX_INITIALIZER;
 static int rcclTelemetrySnapshotActive = 0;
 
+/* ---- Periodic HW-counter sampler (time series for congestion) ------ */
+/* When RCCL_TELEMETRY_SAMPLE_MS > 0, a background thread samples a small
+ * set of congestion-relevant IB-sysfs counters plus the atomic SW byte
+ * counters at a fixed interval. Only cheap file reads + atomic loads are
+ * done (no ethtool/popen), so the hot path is undisturbed. The absolute
+ * per-sample values are emitted as a "hw_samples" time series; rates are
+ * computed offline by the trace merger. */
+static const char* const rcclTelSampledNames[] = {
+  "np_ecn_marked_roce_packets", "np_cnp_sent", "rp_cnp_handled",
+  "out_of_buffer", "packet_seq_err", "out_of_sequence",
+  "local_ack_timeout_err", "rnr_nak_retry_err"
+};
+#define RCCL_TEL_NUM_SAMPLED ((int)(sizeof(rcclTelSampledNames) / sizeof(rcclTelSampledNames[0])))
+#define RCCL_TEL_MAX_SAMPLES 100000
+
+typedef struct {
+  int64_t  ts_us;                       /* absolute CLOCK_MONOTONIC microseconds */
+  int      dev_idx;
+  uint64_t tx_bytes;                    /* SW cumulative */
+  uint64_t rx_bytes;
+  int64_t  cong[RCCL_TEL_NUM_SAMPLED];  /* absolute HW counter values, -1 = N/A */
+} RcclHwSample;
+
+static RcclHwSample* rcclTelemetrySamples = NULL;
+static int           rcclTelemetryNumSamples = 0;
+static int           rcclTelemetrySampleIntervalMs = 0;
+static pthread_t     rcclTelemetrySamplerThread;
+static int           rcclTelemetrySamplerRunning = 0;
+static volatile int  rcclTelemetrySamplerStopFlag = 0;
+
 /* ================================================================== */
 /* Hardware-agnostic counter model                                     */
 /*                                                                     */
@@ -296,6 +326,8 @@ static int rcclTelemetryIsCounterEnabled(const char* counter_name);
 static void rcclTelemetryGetTimestamp(char* buf, size_t size);
 static void rcclTelemetryWriteJson(FILE* fp);
 static void rcclTelemetrySnapshotInit(RcclDeviceStats* dev);
+static void rcclTelemetrySamplerStart(void);
+static void rcclTelemetrySamplerStop(void);
 static void rcclTelemetryCollectDebugfs(int64_t* hwc,
                                          const char* roce_device,
                                          const char* driver_name,
@@ -424,6 +456,12 @@ void rcclTelemetryInit(void) {
     rcclTelemetryCfg.hw_counter_list[sizeof(rcclTelemetryCfg.hw_counter_list) - 1] = '\0';
   }
 
+  env_val = getenv("RCCL_TELEMETRY_SAMPLE_MS");
+  if (env_val != NULL && env_val[0] != '\0') {
+    int val = atoi(env_val);
+    if (val > 0) rcclTelemetrySampleIntervalMs = val;
+  }
+
   memset(rcclTelemetryDevs, 0, sizeof(rcclTelemetryDevs));
   rcclTelemetryNumDevs = 0;
 
@@ -468,6 +506,8 @@ void rcclTelemetryInit(void) {
   }
 
   atexit(rcclTelemetryFlush);
+
+  rcclTelemetrySamplerStart();
 }
 
 void rcclTelemetryFlush(void) {
@@ -479,6 +519,9 @@ void rcclTelemetryFlush(void) {
   if (__atomic_exchange_n(&flushed, 1, __ATOMIC_SEQ_CST)) {
     return;
   }
+
+  /* Stop the sampler first so the sample buffer is stable while we write. */
+  rcclTelemetrySamplerStop();
 
   for (int i = 0; i < rcclTelemetryNumDevs; i++) {
     rcclTelemetryCollectHwCounters(&rcclTelemetryDevs[i]);
@@ -948,6 +991,80 @@ static int64_t rcclTelemetryReadHwCounter(const char* roce_device, const char* c
 }
 
 /* ------------------------------------------------------------------ */
+/* Periodic HW-counter sampler                                        */
+/* ------------------------------------------------------------------ */
+
+/* Resolve a sampled counter name to its index in the device's HW table. */
+static int rcclTelemetrySampledTableIdx(const RcclHwConfig* hw, int sampled) {
+  for (int c = 0; c < hw->num_counters; c++) {
+    if (strcmp(hw->counters[c].json_name, rcclTelSampledNames[sampled]) == 0)
+      return c;
+  }
+  return -1;
+}
+
+static void* rcclTelemetrySamplerMain(void* arg) {
+  (void)arg;
+  /* Per-device cache of resolved table indices (-2 = not yet resolved). */
+  int idx_cache[RCCL_TELEMETRY_MAX_DEVS][RCCL_TEL_NUM_SAMPLED];
+  for (int i = 0; i < RCCL_TELEMETRY_MAX_DEVS; i++)
+    for (int c = 0; c < RCCL_TEL_NUM_SAMPLED; c++) idx_cache[i][c] = -2;
+
+  while (!__atomic_load_n(&rcclTelemetrySamplerStopFlag, __ATOMIC_ACQUIRE)) {
+    int64_t ts_us = rcclTelemetryGetNs() / 1000;
+    int nd = __atomic_load_n(&rcclTelemetryNumDevs, __ATOMIC_ACQUIRE);
+    if (nd > RCCL_TELEMETRY_MAX_DEVS) nd = RCCL_TELEMETRY_MAX_DEVS;
+
+    for (int i = 0; i < nd; i++) {
+      RcclDeviceStats* dev = &rcclTelemetryDevs[i];
+      if (dev->roce_device[0] == '\0' || dev->hw_config == NULL) continue;
+      const RcclHwConfig* hw = (const RcclHwConfig*)dev->hw_config;
+
+      int s = rcclTelemetryNumSamples;
+      if (s >= RCCL_TEL_MAX_SAMPLES) return NULL;   /* buffer full: stop sampling */
+      RcclHwSample* smp = &rcclTelemetrySamples[s];
+
+      smp->ts_us    = ts_us;
+      smp->dev_idx  = i;
+      smp->tx_bytes = __atomic_load_n(&dev->tx_bytes, __ATOMIC_RELAXED);
+      smp->rx_bytes = __atomic_load_n(&dev->rx_bytes, __ATOMIC_RELAXED);
+      for (int c = 0; c < RCCL_TEL_NUM_SAMPLED; c++) {
+        if (idx_cache[i][c] == -2) idx_cache[i][c] = rcclTelemetrySampledTableIdx(hw, c);
+        int ti = idx_cache[i][c];
+        smp->cong[c] = (ti >= 0)
+          ? rcclTelemetryReadHwCounter(dev->roce_device, hw->counters[ti].key)
+          : -1;
+      }
+      rcclTelemetryNumSamples = s + 1;
+    }
+
+    struct timespec req;
+    req.tv_sec  = rcclTelemetrySampleIntervalMs / 1000;
+    req.tv_nsec = (long)(rcclTelemetrySampleIntervalMs % 1000) * 1000000L;
+    nanosleep(&req, NULL);
+  }
+  return NULL;
+}
+
+static void rcclTelemetrySamplerStart(void) {
+  if (rcclTelemetrySampleIntervalMs <= 0) return;
+  rcclTelemetrySamples =
+    (RcclHwSample*)calloc(RCCL_TEL_MAX_SAMPLES, sizeof(RcclHwSample));
+  if (rcclTelemetrySamples == NULL) return;
+  rcclTelemetrySamplerStopFlag = 0;
+  if (pthread_create(&rcclTelemetrySamplerThread, NULL,
+                     rcclTelemetrySamplerMain, NULL) == 0)
+    rcclTelemetrySamplerRunning = 1;
+}
+
+static void rcclTelemetrySamplerStop(void) {
+  if (!rcclTelemetrySamplerRunning) return;
+  __atomic_store_n(&rcclTelemetrySamplerStopFlag, 1, __ATOMIC_RELEASE);
+  pthread_join(rcclTelemetrySamplerThread, NULL);
+  rcclTelemetrySamplerRunning = 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Batched debugfs reader                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1185,6 +1302,26 @@ static void rcclTelemetryWriteJson(FILE* fp) {
   }
   if (devsPrinted > 0) fprintf(fp, "\n");
 
-  fprintf(fp, "  ]\n");
+  fprintf(fp, "  ]");
+
+  /* Periodic HW-counter time series (absolute values; rates computed offline). */
+  if (rcclTelemetryNumSamples > 0 && rcclTelemetrySamples != NULL) {
+    fprintf(fp, ",\n  \"hw_samples\": [\n");
+    for (int i = 0; i < rcclTelemetryNumSamples; i++) {
+      RcclHwSample* s = &rcclTelemetrySamples[i];
+      RcclDeviceStats* dev = &rcclTelemetryDevs[s->dev_idx];
+      fprintf(fp, "    {\"ts_us\": %ld, \"device_id\": %d, \"roce_device\": \"%s\", "
+                  "\"tx_bytes\": %lu, \"rx_bytes\": %lu",
+              (long)s->ts_us, dev->device_id, dev->roce_device,
+              (unsigned long)s->tx_bytes, (unsigned long)s->rx_bytes);
+      for (int c = 0; c < RCCL_TEL_NUM_SAMPLED; c++)
+        fprintf(fp, ", \"%s\": %ld", rcclTelSampledNames[c], (long)s->cong[c]);
+      fprintf(fp, "}%s\n", (i < rcclTelemetryNumSamples - 1) ? "," : "");
+    }
+    fprintf(fp, "  ]\n");
+  } else {
+    fprintf(fp, "\n");
+  }
+
   fprintf(fp, "}\n");
 }
