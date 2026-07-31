@@ -121,10 +121,17 @@ struct ncclCoopTile { // An aligned pow2 set of threads within the warp.
     return (ncclCoopMask_t(-1) >> (WARP_SIZE - nThreadsPow2)) << (nccl::utility::lane() & -nThreadsPow2);
   }
   NCCL_DEVICE_INLINE void sync() {
-#if ROCM_VERSION >= 70000
-    if (nThreadsPow2 > 1) __syncwarp(laneMask());
+    // This sync is warp-scoped, so a CTA-wide barrier is not a conservative
+    // substitute for it: it deadlocks whenever only some waves of the block
+    // reach this point, which is the normal case for a warp-partitioned kernel.
+    // On AMD, __syncwarp(mask) only validates the mask and then delegates to the
+    // maskless form (a wavefront fence pair around __builtin_amdgcn_wave_barrier),
+    // so pre-7.0 ROCm -- where the 64-bit mask overload is unavailable -- gets
+    // the same operation from the maskless call.
+#if defined(NCCL_HIP_PLATFORM) && ROCM_VERSION < 70000
+    if (nThreadsPow2 > 1) __syncwarp();
 #else
-    __syncthreads();
+    if (nThreadsPow2 > 1) __syncwarp(laneMask());
 #endif
   }
 };
@@ -151,10 +158,11 @@ struct ncclCoopLanes { // Some lanes of this warp.
     return ncclCoopPopc(lmask);
   }
   NCCL_DEVICE_INLINE void sync() {
-#if ROCM_VERSION >= 70000
-    __syncwarp(lmask);
+    // Warp-scoped; see ncclCoopTile::sync() for why this must not be a CTA barrier.
+#if defined(NCCL_HIP_PLATFORM) && ROCM_VERSION < 70000
+    __syncwarp();
 #else
-    __syncthreads();
+    __syncwarp(lmask);
 #endif
   }
 };
