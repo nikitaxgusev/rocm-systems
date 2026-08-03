@@ -718,6 +718,15 @@ static ncclResult_t symMemoryObtain(struct ncclComm* comm, CUmemGenericAllocatio
   struct ncclDevrMemory* mem = nullptr;
   // New memory.
   NCCLCHECKGOTO(ncclCalloc(&mem, 1), ret, fail_mem);
+  // The creator holds the initial reference. Without this the calloc-zeroed
+  // refCount underflows on the first symMemoryDropRef (0 == --refCount is false
+  // for -1), so the memory is never released on ncclCommWindowDeregister and
+  // instead leaks until the ncclDevrFinalize drain. In single-process /
+  // multi-rank scenarios that leak lets a freed-then-reallocated buffer reuse a
+  // virtual address that still has a live ncclDevrMemory, producing two records
+  // with the same primaryAddr but different bigOffset and corrupting symmetric
+  // address resolution.
+  mem->refCount = 1;
   NCCLCHECKGOTO(ncclCalloc(&mem->memHandles, numSegments), ret, fail_mem);
   memcpy(mem->memHandles, memHandles, sizeof(*mem->memHandles) * numSegments);
   mem->primaryAddr = memAddr;
