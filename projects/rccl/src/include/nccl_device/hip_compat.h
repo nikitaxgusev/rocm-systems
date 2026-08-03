@@ -33,6 +33,18 @@
 // Backward-compat aliases for the IR bitcode binding layer (PR #6435).
 #define NCCL_CHECK_CUDACC NCCL_DEVICE_COMPILE
 
+// hipcc doesn't predefine ROCM_VERSION, and out-of-tree consumers of these
+// headers may omit -DROCM_VERSION; derive it from rocm-core so the ROCM_VERSION
+// gates below (host-NUMA shim, coop.h warp-sync) don't misfire.
+#if !defined(ROCM_VERSION) && defined(__HIP_PLATFORM_AMD__) && defined(__has_include)
+#if __has_include(<rocm-core/rocm_version.h>)
+#include <rocm-core/rocm_version.h>
+#if !defined(ROCM_VERSION) && defined(ROCM_VERSION_MAJOR)
+#define ROCM_VERSION (10000 * ROCM_VERSION_MAJOR + 100 * ROCM_VERSION_MINOR + ROCM_VERSION_PATCH)
+#endif
+#endif
+#endif
+
 ////////////////////////////////////////////////////////////////////////////////
 // CUDA driver memory-location enum shim (host-NUMA)
 //
