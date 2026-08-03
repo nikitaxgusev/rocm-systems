@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <mutex>
+#include <vector>
 #include "cuda_runtime.h"
 #include "nccl.h"
 #include "reshard_types.h"
@@ -23,15 +24,19 @@
  *
  * Growth (high-water-mark): the old buffer is parked in gRetired and
  * freed only at finalization.  This avoids any cudaDeviceSynchronize
- * or cudaStreamSynchronize on the hot path.
+ * or cudaStreamSynchronize on the hot path.  In single-process /
+ * multi-rank every rank thread shares this one pool, so the retired
+ * list accumulates one entry per rank per growth; it is an unbounded
+ * vector rather than a fixed array so a legitimate run with many ranks
+ * and buffer growths never spuriously fails.  gRetired only holds
+ * pointers -- the backing VRAM is bounded by the high-water sizes and
+ * reclaimed together in transposeBufferFinalize.
  * ====================================================================*/
 
 static TransposeBufferEntry gPool[MAX_TRANSPOSE_BUFFER_ENTRIES];
 static int gPoolCount = 0;
 
-#define MAX_RETIRED_BUFFERS (MAX_TRANSPOSE_BUFFER_ENTRIES * 2)
-static void* gRetired[MAX_RETIRED_BUFFERS];
-static int gRetiredCount = 0;
+static std::vector<void*> gRetired;
 
 /* Guards the process-global transpose buffer pool. In single-process /
  * multi-rank (one host thread per rank sharing this address space) every rank
@@ -65,18 +70,11 @@ ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, cudaSt
     if (entry->capacity >= requiredBytes) return ncclSuccess;
 
     /* Growth: retire the old buffer and allocate a larger one. */
-    if (gRetiredCount >= MAX_RETIRED_BUFFERS) {
-      fprintf(stderr,
-              "[nccl-reshard] Transpose retired-buffer list full (%d); "
-              "too many buffer growths.\n",
-              MAX_RETIRED_BUFFERS);
-      return ncclInternalError;
-    }
     RESHARD_DEBUG(-1,
                   "Transpose buffer growing for comm %p: %zu -> %zu bytes "
                   "(retiring %p)",
                   (void*)comm, entry->capacity, requiredBytes, entry->buffer);
-    gRetired[gRetiredCount++] = entry->buffer;
+    gRetired.push_back(entry->buffer);
     entry->buffer = nullptr;
     entry->capacity = 0;
 
@@ -139,13 +137,10 @@ void transposeBufferFinalize() {
   }
   gPoolCount = 0;
 
-  for (int i = 0; i < gRetiredCount; i++) {
-    if (gRetired[i] != nullptr) {
-      ncclMemFree(gRetired[i]);
-      gRetired[i] = nullptr;
-    }
+  for (void* buf : gRetired) {
+    if (buf != nullptr) ncclMemFree(buf);
   }
-  gRetiredCount = 0;
+  gRetired.clear();
 }
 
 bool shouldTransposeForCrossDim(const size_t* srcDimsBytes, const size_t* dstDimsBytes, int ndims, int srcShardDim,
