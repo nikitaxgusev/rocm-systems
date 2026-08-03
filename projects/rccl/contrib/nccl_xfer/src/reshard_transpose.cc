@@ -6,6 +6,7 @@
  ************************************************************************/
 
 #include <cstdio>
+#include <mutex>
 #include "cuda_runtime.h"
 #include "nccl.h"
 #include "reshard_types.h"
@@ -32,6 +33,19 @@ static int gPoolCount = 0;
 static void* gRetired[MAX_RETIRED_BUFFERS];
 static int gRetiredCount = 0;
 
+/* Guards the process-global transpose buffer pool. In single-process /
+ * multi-rank (one host thread per rank sharing this address space) every rank
+ * thread calls ensureTransposeBuffer / getTransposeBuffer* concurrently on the
+ * same globals. Without this lock the non-atomic gPoolCount++ and gPool[] /
+ * gRetired[] writes race: a rank can read a torn count or half-written slot,
+ * miss its own comm's entry, and end up with a wrong buffer/capacity. Since
+ * getTransposeBufferCapacity() feeds the internal-window cache key, that in
+ * turn makes ranks disagree on whether the transpose window is already
+ * registered -- a subset then skips the COLLECTIVE ncclCommWindowRegister and
+ * the reshard deadlocks. All allocation here is local (ncclMemAlloc), never a
+ * collective, so holding this lock across the body is deadlock-free. */
+static std::mutex gTransposeMutex;
+
 static TransposeBufferEntry* findPoolEntry(ncclComm_t comm) {
   for (int i = 0; i < gPoolCount; i++)
     if (gPool[i].comm == comm && gPool[i].allocated) return &gPool[i];
@@ -39,6 +53,7 @@ static TransposeBufferEntry* findPoolEntry(ncclComm_t comm) {
 }
 
 ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, cudaStream_t stream) {
+  std::lock_guard<std::mutex> lk(gTransposeMutex);
   TransposeBufferEntry* entry = findPoolEntry(comm);
 
   if (entry != nullptr) {
@@ -97,22 +112,26 @@ ncclResult_t ensureTransposeBuffer(ncclComm_t comm, size_t requiredBytes, cudaSt
 }
 
 void* getTransposeBuffer(ncclComm_t comm) {
+  std::lock_guard<std::mutex> lk(gTransposeMutex);
   TransposeBufferEntry* e = findPoolEntry(comm);
   return (e != nullptr) ? e->buffer : nullptr;
 }
 
 size_t getTransposeBufferCapacity(ncclComm_t comm) {
+  std::lock_guard<std::mutex> lk(gTransposeMutex);
   TransposeBufferEntry* e = findPoolEntry(comm);
   return (e != nullptr) ? e->capacity : 0;
 }
 
 ncclResult_t transposeBufferRecordEvent(ncclComm_t comm, cudaStream_t stream) {
+  std::lock_guard<std::mutex> lk(gTransposeMutex);
   TransposeBufferEntry* e = findPoolEntry(comm);
   if (e != nullptr) NCCLXFER_CUDACHECK(cudaEventRecord(e->event, stream));
   return ncclSuccess;
 }
 
 void transposeBufferFinalize() {
+  std::lock_guard<std::mutex> lk(gTransposeMutex);
   for (int i = 0; i < gPoolCount; i++) {
     if (gPool[i].event != nullptr) cudaEventDestroy(gPool[i].event);
     if (gPool[i].buffer != nullptr) ncclMemFree(gPool[i].buffer);
