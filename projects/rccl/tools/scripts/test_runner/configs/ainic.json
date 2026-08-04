@@ -31,7 +31,7 @@
 
   "rccl_tests_build_configuration": {
     "enabled": true,
-    "source_dir": "${WORKDIR:-$PWD}/projects/rccl/contrib/nccl_xfer",
+    "source_dir": "${WORKDIR:-$PWD}/contrib/nccl_xfer",
     "build_command": "make -f Makefile.rocm -j lib bench tests OFFLOAD_ARCH=gfx950 GTEST_DIR=${GTEST_DIR:-} MPICC=${MPI_PATH:-/it-share/ompi-5.0.8}/bin/mpicc",
     "env_variables": {
       "NCCL_XFER_BUILD_NOTE": "Builds contrib/nccl_xfer (libnccl_xfer.so + reshard_bench + basic_api_test_{local,mpi}) against the librccl built above via Makefile.rocm. RCCL_HOME/NCCL_HOME/ROCM_PATH/MPI_HOME are exported by the runner. reshard_bench needs no gtest; the functional tests (Group D D1-D8) need a prebuilt googletest - set GTEST_DIR in the CI environment (tree with include/ + lib/), otherwise the make 'tests' target no-ops and only the bench (D9-D16) binaries are produced. Output goes to contrib/nccl_xfer/build/bin (see Group D test_binary_dir)."
@@ -414,7 +414,7 @@
 
     "d_m2n_local": {
       "extends": "d_m2n_base",
-      "binary": "${WORKDIR:-$PWD}/projects/rccl/contrib/nccl_xfer/build/bin/basic_api_test_local",
+      "binary": "${WORKDIR:-$PWD}/contrib/nccl_xfer/build/bin/basic_api_test_local",
       "description": "D1-D4: single-process multi-rank (ncclCommInitAll, one host thread per GPU). World size = visible GPUs, so num_gpus selects the 192-case (8) or 51-case (4) matrix.",
       "tests": [
         { "name": "D1_local_ring_w8",   "command_args": "--algorithm ring",   "num_gpus": 8, "description": "Single-process 8-rank RING, full 192-case reshard matrix." },
@@ -426,7 +426,7 @@
 
     "d_m2n_mpi": {
       "extends": "d_m2n_base",
-      "binary": "${WORKDIR:-$PWD}/projects/rccl/contrib/nccl_xfer/build/bin/basic_api_test_mpi",
+      "binary": "${WORKDIR:-$PWD}/contrib/nccl_xfer/build/bin/basic_api_test_mpi",
       "description": "D5-D8: one rank per process (MPI). num_ranks selects the 192-case (8) or 51-case (4) matrix.",
       "tests": [
         { "name": "D5_mpi_ring_w8",   "command_args": "--algorithm ring",   "num_ranks": 8, "description": "MPI 8-rank RING, full 192-case reshard matrix." },
@@ -438,7 +438,7 @@
 
     "d_m2n_bench": {
       "is_gtest": false,
-      "binary": "${WORKDIR:-$PWD}/projects/rccl/contrib/nccl_xfer/build/bin/reshard_bench",
+      "binary": "${WORKDIR:-$PWD}/contrib/nccl_xfer/build/bin/reshard_bench",
       "num_ranks": 6,
       "num_nodes": 1,
       "num_gpus": 8,
