@@ -715,7 +715,27 @@ static ncclResult_t symMemoryObtain(struct ncclComm* comm, CUmemGenericAllocatio
   struct segmentInfo* globalSegmentInfo = nullptr;
   const int globalLsaTeamBaseIdx = devr->lsaSize * (comm->rank / devr->lsaSize);
 
-  struct ncclDevrMemory* mem = nullptr;
+  struct ncclDevrMemory* mem = devr->memHead;
+  while (mem != nullptr) {
+    if (mem->primaryAddr == memAddr && mem->size == size && mem->numSegments == numSegments) {
+      // Check if all memHandles that [memAddr, memAddr + size] spans also match
+      bool allMatch = true;
+      for (int segment = 0; segment < mem->numSegments; segment++) {
+        if (mem->memHandles[segment] != memHandles[segment]) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) {
+        for (int segment = 0; segment < mem->numSegments; segment++) {
+          CUCHECKIGNORE(cuMemRelease(memHandles[segment]));
+        }
+        goto leave;
+      }
+    }
+    mem = mem->next;
+  }
+
   // New memory.
   NCCLCHECKGOTO(ncclCalloc(&mem, 1), ret, fail_mem);
   NCCLCHECKGOTO(ncclCalloc(&mem->memHandles, numSegments), ret, fail_mem);
@@ -792,6 +812,17 @@ static ncclResult_t symMemoryObtain(struct ncclComm* comm, CUmemGenericAllocatio
   mem->next = devr->memHead;
   devr->memHead = mem;
 
+leave:
+  // The creator holds the initial reference (new memory starts calloc-zeroed at
+  // refCount 0; a dedup hit increments the existing record). Without this the
+  // refCount underflows on the first symMemoryDropRef (0 == --refCount is false
+  // for -1), so memory is never released on ncclCommWindowDeregister and leaks
+  // until the ncclDevrFinalize drain. In single-process / multi-rank scenarios
+  // that leak lets a freed-then-reallocated buffer reuse a virtual address that
+  // still has a live ncclDevrMemory, producing two records with the same
+  // primaryAddr but different bigOffset and corrupting symmetric address
+  // resolution.
+  mem->refCount += 1;
   *outMem = mem;
   free(globalSegmentInfo);
   return ret;
