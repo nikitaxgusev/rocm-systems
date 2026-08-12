@@ -117,6 +117,35 @@ asynchronous errors at the same time, instead of blocking in
        }
    }
 
+.. _ft-symmetric-abort:
+
+Aborting symmetric-memory collectives
+=====================================
+
+Collectives that run on symmetric memory are served by the built-in symmetric
+kernels, which exchange data directly between peer GPUs instead of going through
+a proxy thread. A rank that never reaches the collective therefore leaves its
+peers parked inside a device-side spin loop, where the host cannot see them.
+
+To make these collectives recoverable, the symmetric kernels poll the
+communicator's abort flag from within their wait loops. Calling
+:cpp:func:`ncclCommAbort` sets that flag, the waiting kernels stop spinning and
+return, and the stream drains so the host can continue with recovery. This covers
+every wait loop the symmetric kernels rely on: the low-latency (LL) all-to-all
+exchange, the local shared-address (LSA) barrier, and the GPU-initiated
+networking (GIN) completion waits.
+
+The flag is only sampled periodically, so expect a short delay between the
+:cpp:func:`ncclCommAbort` call and the stream draining. Poll the stream as shown
+in :ref:`async-errors` rather than blocking in ``hipStreamSynchronize``.
+
+.. note::
+
+   Symmetric memory requires ``NCCL_CUMEM_ENABLE=1`` and a host platform that
+   supports virtual memory management. When symmetric memory is unavailable,
+   collectives fall back to the general kernels, whose abort path is handled by
+   the proxy thread instead.
+
 .. _ft-recovery:
 
 Recovering from a failure
