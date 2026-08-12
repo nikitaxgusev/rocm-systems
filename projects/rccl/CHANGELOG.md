@@ -12,6 +12,9 @@ Full documentation for RCCL is available at [https://rccl.readthedocs.io](https:
 * Updated the ROCSHMEM GIN plugin registration to the v14 layout (corrected struct field names and the conditional that previously only compiled without ROCSHMEM GIN).
 * Adapted the InfiniBand transports (`net_ib` and `net_ib_cast`) to the v14 GIN/RMA split: the host/proxy backend is now registered as an `ncclRma_t` vtable (`RMA_IB_PROXY`) that owns the `iput`/`iputSignal`/`iget`/`iflush`/`test` data-path ops, with GIN layered on top through the generic `ncclGinProxy`.
 
+### Fixed
+* Fixed `NCCL_CHECK_MODE` having no effect. `commAlloc` reset `comm->checkMode` from the deprecated `NCCL_CHECK_POINTERS` after `NCCL_CHECK_MODE` had already been parsed, so `DEBUG_LOCAL` was only reachable through the deprecated variable and `DEBUG_GLOBAL`, which validates symmetric buffer registration across ranks, was unreachable entirely.
+
 ## RCCL 2.30.4 for ROCm 7.14.0
 
 ### Added
