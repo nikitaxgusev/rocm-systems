@@ -1,0 +1,133 @@
+===============================================================================
+AICOMRCCL-1179  -  Symmetric-window multi-segment registration
+Validation instructions (single node) + what still needs checking
+===============================================================================
+
+0. TL;DR
+--------
+- WHAT to validate: RCCL's multi-segment symmetric-window registration path
+  (buffers backed by several disjoint physical cuMem/VMM segments) on a single
+  node. This is the code that PR #7034 landed and that AICOMRCCL-1179 asks us to
+  validate/port for older drivers.
+- WHERE: 1x node with 8x MI300X (gfx942), inside a ROCm 7.14 container whose
+  /opt/rocm/bin/amdclang++ actually works (the therock 7.14 framework image does;
+  the plain rocm/dev "-full" image has no cmake, and the "mori" image ships a
+  broken amdclang++).
+- HOW: build+run test/RegistrationMPITests.cpp -> suite "UBR_MultiSegment".
+- RESULT so far: UBR_MultiSegment.Generic PASSES at -np 2 (real multi-segment
+  IPC registration: "numSegments 4", register success, collectives OK).
+
+
+1. Test suite and cases (test/RegistrationMPITests.cpp, class UBR_MultiSegment)
+-------------------------------------------------------------------------------
+Six cases. Each first ASSERTs the required env (see section 4) then builds a
+multi-segment buffer with hipMemCreate + hipMemAddressReserve + hipMemMap and
+drives registration / collectives:
+
+  UBR_MultiSegment.Generic            device-only multi-segment IPC register
+  UBR_MultiSegment.Generic_Reuse      same, exercising handle reuse
+  UBR_MultiSegment.Symmetric_Lsa      symmetric window, intra-node LSA path
+  UBR_MultiSegment.Symmetric_LsaGin   symmetric + GIN  (skips if GIN unavailable)
+  UBR_MultiSegment.Symmetric_Elastic_Lsa      host-backed (sysmem) segments
+  UBR_MultiSegment.Symmetric_Elastic_Gating   elastic-buffer gating checks
+
+Note: UBR_MultiSegment::SetUp() auto-SKIPs the whole suite if it detects more
+than one node (multi-node multi-segment needs the HIP/HSA dmabuf fix; tracked in
+AIRUNTIME-2351 / AICOMRCCL-1359 / -1526 / -1608). So this suite is single-node
+by design.
+
+
+2. Hardware / software prerequisites
+------------------------------------
+- 1 node, >=2 MI300X (gfx942) GPUs visible.
+- ROCm 7.14 container with a WORKING /opt/rocm/bin/amdclang++ and cmake.
+  Verified image: therock 7.14 framework image
+  (registry-sc-harbor.amd.com/framework/therock-main:...7.14.0...pytorch...).
+- OpenMPI (host mount is fine, e.g. /opt/openmpi-5.0.8) plus its runtime deps:
+  libhcoll (from HPC-X), libxpmem, libnl-3/libnl-route-3, libibverbs, librdmacm.
+- A PREBUILT RCCL Release build tree that already contains librccl.so.* built
+  for gfx942 (here: /home/nigusev/rccl-findwindow-714/projects/rccl/build/release).
+
+  IMPORTANT: the prebuilt librccl is tied to the toolchain that produced it.
+  Reconfiguring in a *different* 7.14 image changes the compiler and would force
+  a librccl device-code rebuild (which currently fails under a mismatched image
+  with "amdsmi_wrap.h: unknown type name 'amdsmi_fabric_type_t'"). The runner
+  script avoids this by compiling ONLY the MPI test objects and linking a
+  minimal binary against the prebuilt librccl.so (see run_ubr_multisegment.sh).
+
+
+3. How to run
+-------------
+Launch the container (single node, all GPUs), mounting home + MPI + HPC-X:
+
+  docker run --rm -it \
+    --device=/dev/kfd --device=/dev/dri \
+    --group-add 44 --group-add 110 --group-add 4000 \
+    --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+    --ipc=host --shm-size 16G \
+    -v /home/<you>:/home/<you> \
+    -v /opt/openmpi-5.0.8:/opt/openmpi-5.0.8 \
+    -v /opt/hpcx-v2.23-...:/opt/hpcx-v2.23-... \
+    --entrypoint bash \
+    <therock-7.14-image>
+
+Inside the container:
+
+  export BUILD=/home/<you>/rccl-findwindow-714/projects/rccl/build/release
+  export MPI_HOME=/opt/openmpi-5.0.8
+  export HPCX=/opt/hpcx-v2.23-gcc-doca_ofed-ubuntu22.04-cuda12-x86_64
+  export EXTRA_LIBS=/home/<you>/mpi_extra_libs      # libxpmem/libnl/libibverbs
+  export NP=2                                        # reliable on this host
+  bash projects/rccl/contrib/multiseg_validation/run_ubr_multisegment.sh
+
+To run one case:   FILTER='UBR_MultiSegment.Generic' NP=2 bash run_ubr_multisegment.sh
+To try full suite: FILTER='*MultiSegment*'            NP=2 bash run_ubr_multisegment.sh
+
+
+4. Required RCCL environment (the suite ASSERTs these; missing ones = instant FAIL)
+----------------------------------------------------------------------------------
+  NCCL_CUMEM_ENABLE=1
+  NCCL_WIN_ENABLE=1
+  NCCL_MULTI_SEGMENT_REGISTER=1
+  NCCL_LOCAL_REGISTER=1          <-- easy to forget; RegistrationMPITests.cpp:773
+  RCCL_MPI_LOG_ALL_RANKS=1       <-- also asserted (per-rank logging)
+  NCCL_SOCKET_IFNAME=lo          (single node)
+The runner script sets all of these.
+
+
+5. What was actually observed on this node (kernel 5.15.0-oracle, ROCm 7.14 ctr)
+--------------------------------------------------------------------------------
+- Build: 31 MPI test TUs compile clean; minimal binary links against the
+  prebuilt librccl.so.1.0 + getHostName shim.
+- NCCL_DEBUG WARN "cuMem support requires Linux kernel >= 6.8" is printed
+  (host kernel is 5.15) but is NON-FATAL: registration proceeds via IPC.
+- UBR_MultiSegment.Generic @ -np 2: PASSED (2.6 s). Log confirms the real
+  multi-segment path:
+      numSegments 4 ... IPC register buffer ... register success ... [ OK ]
+- @ -np 8 over loopback the first case stalled (no progress after the banner).
+  Treat np=8 as a separate scaling/transport item, not a code failure.
+
+
+6. STILL TO CHECK / open items
+------------------------------
+a) Run the remaining 5 cases individually at -np 2 and record pass/skip/fail:
+   Generic_Reuse, Symmetric_Lsa, Symmetric_LsaGin (may SKIP if no GIN),
+   Symmetric_Elastic_Lsa (host/sysmem segments; needs ROCm >= 7.12 host alloc),
+   Symmetric_Elastic_Gating.
+b) Root-cause the -np 8 stall on loopback (bootstrap/socket vs resource). Try
+   -np 4, a non-loopback NCCL_SOCKET_IFNAME, and NCCL_DEBUG=INFO SUBSYS=INIT,NET.
+c) Re-run on a kernel >= 6.8 host so cuMem is fully enabled (removes the WARN)
+   and confirm identical results end-to-end.
+d) Ideally rebuild librccl + rccl-UnitTestsMPI cleanly in the SAME 7.14 image
+   (avoids the minimal-link workaround). Blockers to clear first: the
+   amdsmi_wrap.h fabric-type mismatch (AMDSMI_FABRIC_DIRECT) under that image.
+e) Multi-node multi-segment stays OUT OF SCOPE until the HIP/HSA dmabuf export
+   fix lands (AIRUNTIME-2351); the suite self-skips on >1 node.
+
+
+7. Files in this folder
+-----------------------
+  run_ubr_multisegment.sh   build (object-only) + minimal-link + run harness
+  gethostname_shim.cpp      ABI-compatible getHostName() for the minimal link
+  INSTRUCTIONS.txt          this file
+===============================================================================
