@@ -8,6 +8,7 @@
 #include "connect_cast.h"
 #include "common_cast.h"
 #include "p2p_resiliency_cast.h"
+#include "net_ib_cast_hostlogic.h"
 
 NCCL_PARAM(IbCastGidIndex, "IB_GID_INDEX", -1);
 NCCL_PARAM(IbCastRoutableFlidIbGidIndex, "IB_ROUTABLE_FLID_GID_INDEX", 1);
@@ -187,14 +188,6 @@ static void* envIbAddrRange(sa_family_t af, int* mask) {
   return ret;
 }
 
-static sa_family_t getGidAddrFamily(union ibv_gid* gid) {
-  const struct in6_addr* a = (struct in6_addr*)gid->raw;
-  bool isIpV4Mapped = ((a->s6_addr32[0] | a->s6_addr32[1]) | (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL;
-  bool isIpV4MappedMulticast =
-    (a->s6_addr32[0] == htonl(0xff0e0000) && ((a->s6_addr32[1] | (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
-  return (isIpV4Mapped || isIpV4MappedMulticast) ? AF_INET : AF_INET6;
-}
-
 static bool matchGidAddrPrefix(sa_family_t af, void* prefix, int prefixlen, union ibv_gid* gid) {
   struct in_addr* base = NULL;
   struct in6_addr* base6 = NULL;
@@ -236,27 +229,6 @@ static bool matchGidAddrPrefix(sa_family_t af, void* prefix, int prefixlen, unio
   }
 
   return (prefixlen == 0) ? true : false;
-}
-
-static bool configuredGid(union ibv_gid* gid) {
-  const struct in6_addr* a = (struct in6_addr*)gid->raw;
-  int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
-  if (((a->s6_addr32[0] | trailer) == 0UL) || ((a->s6_addr32[0] == htonl(0xfe800000)) && (trailer == 0UL))) {
-    return false;
-  }
-  return true;
-}
-
-static bool linkLocalGid(union ibv_gid* gid) {
-  const struct in6_addr* a = (struct in6_addr*)gid->raw;
-  if (a->s6_addr32[0] == htonl(0xfe800000) && a->s6_addr32[1] == 0UL) {
-    return true;
-  }
-  return false;
-}
-
-static bool validGid(union ibv_gid* gid) {
-  return (configuredGid(gid) && !linkLocalGid(gid));
 }
 
 static ncclResult_t IbCastRoceGetVersionNum(const char* deviceName, int portNum, int gidIndex, int* version) {
@@ -593,51 +565,8 @@ ncclResult_t IbCastQpError(struct ncclIbQp* qp) {
   return ncclSuccess;
 }
 
-// Check if two RoCE GIDs are on the same subnet.
-// For IPv4-mapped GIDs (::ffff:a.b.c.d), uses the given prefix length (1..32).
-// For native IPv6 GIDs, compares the 64-bit subnet prefix.
-static bool gidSameSubnet(union ibv_gid* local, union ibv_gid* remote, int prefixLen) {
-  sa_family_t localFam = getGidAddrFamily(local);
-  sa_family_t remoteFam = getGidAddrFamily(remote);
-  if (localFam != remoteFam) return false;
-  if (localFam == AF_INET) {
-    // IPv4-mapped: compare using configured prefix length.
-    // IPv4 address is in bytes 12-15 of the raw GID.
-    uint32_t localIp, remoteIp;
-    memcpy(&localIp, local->raw + 12, 4);
-    memcpy(&remoteIp, remote->raw + 12, 4);
-    uint32_t mask = htonl(~((1U << (32 - prefixLen)) - 1));
-    return (localIp & mask) == (remoteIp & mask);
-  } else {
-    // IPv6: compare subnet prefix (first 64 bits)
-    return local->global.subnet_prefix == remote->global.subnet_prefix;
-  }
-}
-
-// check if a local GID matches ANY of the remote GIDs.
-static bool subnetMatchesAny(union ibv_gid* localGid, union ibv_gid* remoteGids, int nRemoteGids, int prefixLen) {
-  for (int r = 0; r < nRemoteGids; r++) {
-    if (validGid(&remoteGids[r]) && gidSameSubnet(localGid, &remoteGids[r], prefixLen)) return true;
-  }
-  return false;
-}
-
-extern "C" int ncclIbCastTestGidSameSubnet(const uint8_t localGid[16], const uint8_t remoteGid[16], int prefixLen) {
-  union ibv_gid l, r;
-  memcpy(l.raw, localGid, 16);
-  memcpy(r.raw, remoteGid, 16);
-  return gidSameSubnet(&l, &r, prefixLen) ? 1 : 0;
-}
-
-extern "C" int ncclIbCastTestSubnetMatchesAny(const uint8_t localGid[16], const uint8_t* remoteGids, int nRemote,
-                                              int prefixLen) {
-  union ibv_gid l;
-  memcpy(l.raw, localGid, 16);
-  union ibv_gid r[NCCL_IB_MAX_DEVS_PER_NIC];
-  if (nRemote < 0 || nRemote > NCCL_IB_MAX_DEVS_PER_NIC) return 0;
-  for (int i = 0; i < nRemote; i++) memcpy(r[i].raw, remoteGids + (size_t)i * 16, 16);
-  return subnetMatchesAny(&l, r, nRemote, prefixLen) ? 1 : 0;
-}
+// gidSameSubnet / subnetMatchesAny (and their extern "C" test wrappers) now
+// live in net_ib_cast_hostlogic.cc so host CI can exercise them GPU-free.
 
 // Given remote GIDs (one per PF on the remote side), find a local merged IB
 // device that shares a subnet with any of them. Writes defaultDev to *foundDev

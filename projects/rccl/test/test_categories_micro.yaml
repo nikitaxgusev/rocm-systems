@@ -15,6 +15,8 @@ test_categories:
       - "P2pMicrotest.*"
       - "FreshRegistrationMicrotest.*"
       - "FreshRegistrationLegacyIpcSucceedsFixture.*"
+      - "NetIbCastPlaneRail.*"
+      - "NetIbCastSubnet.*"
     exclude_windows:
       - "*"
     labels:

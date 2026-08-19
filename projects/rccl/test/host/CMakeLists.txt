@@ -24,6 +24,8 @@ if(BUILD_TESTS)
   # libamdhip64.so (HIP compile requirements are applied below without linking).
   set(TEST_MICRO_SOURCE_FILES
     p2p-test.cc
+    ../transport/NetIbCast/NetIbCastPlaneSubnetTests.cpp  # net-ib-cast plane/subnet host logic
+    ${PROJECT_SOURCE_DIR}/src/transport/net_ib_cast/net_ib_cast_hostlogic.cc  # unit under test (GPU-free, no HIP)
     fakes/nccl_fakes.cc                  # reusable stubs for nccl* symbols
     fakes/p2p_fakes.cc                   # p2p-specific stubs (arch/topo + alloc emulators)
     fakes/hip_fakes.cc                   # HIP runtime seams + link-satisfying stubs
@@ -247,6 +249,8 @@ set(RCCL_INCLUDE_DIRS
   ${RCCL_BUILD_DIR}/include
   ${RCCL_HIPIFY_DIR}/src
   ${RCCL_HIPIFY_DIR}/src/graph
+  ${RCCL_HIPIFY_DIR}/src/transport               # net_ib_limits.h
+  ${RCCL_HIPIFY_DIR}/src/transport/net_ib_cast   # net_ib_cast_inspect.h, net_ib_cast_hostlogic.h
   ${RCCL_TEST_DIR}
   ${RCCL_TEST_DIR}/common
 )
@@ -321,6 +325,8 @@ target_link_libraries(rccl-HostUnitTests PRIVATE
 # HIP runtime.
 add_executable(rccl-UnitTestsMicro
   p2p-test.cc
+  ${RCCL_TEST_DIR}/transport/NetIbCast/NetIbCastPlaneSubnetTests.cpp
+  ${RCCL_TEST_DIR}/../src/transport/net_ib_cast/net_ib_cast_hostlogic.cc
   fakes/nccl_fakes.cc
   fakes/p2p_fakes.cc
   fakes/hip_fakes.cc

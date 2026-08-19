@@ -7,6 +7,7 @@
 
 #include "common_cast.h"
 #include "p2p_resiliency_recovery_cast.h"
+#include "net_ib_cast_hostlogic.h"
 
 extern int64_t ncclParamIbCastQpsPerConn();
 RCCL_PARAM(IbCastQpsPerP2p, "IB_QPS_PER_P2P", 0);
@@ -192,33 +193,9 @@ fail:
   return ncclInternalError;
 }
 
-// NCCL_IB_PLANE_MAX_INDEX must be < 15 as we use int16_t for plane IDs
-// Typically 12 user-defined planes + 1 plane for undefined plane IDs
-#define NCCL_IB_PLANE_MAX_INDEX 14
-#define NCCL_IB_PLANE_VIRT_BIT (0x1 << NCCL_IB_PLANE_MAX_INDEX)
-
-static ncclResult_t IbCastGetPlaneIndex(int devPlane, int16_t* count, int16_t* planes, int16_t* idx) {
-  int16_t p = 0;
-  while (p < *count && planes[p] != devPlane) p++;
-  if (p == *count) {
-    if (p == (NCCL_IB_PLANE_MAX_INDEX - 1)) {
-      WARN("NCCL cannot use more than %d plane IDs.", NCCL_IB_PLANE_MAX_INDEX);
-      return ncclInvalidUsage;
-    }
-    if (devPlane != NCCL_NET_ID_UNDEF && (devPlane & NCCL_IB_PLANE_VIRT_BIT)) {
-      WARN("NCCL cannot use a plane ID that is %d.", devPlane);
-      return ncclInvalidUsage;
-    }
-    planes[(*count)++] = devPlane;
-  }
-  *idx = p;
-  return ncclSuccess;
-}
-
-extern "C" ncclResult_t ncclIbCastTestGetPlaneIndex(int devPlane, int16_t* count, int16_t* planes, int16_t* idx) {
-  if (!count || !planes || !idx) return ncclInvalidArgument;
-  return IbCastGetPlaneIndex(devPlane, count, planes, idx);
-}
+// Plane-index bookkeeping (IbCastGetPlaneIndex), the RoCE GID helpers and the
+// NCCL_IB_PLANE_MAX_INDEX/VIRT_BIT constraints now live in
+// net_ib_cast_hostlogic.{h,cc} so they can be exercised GPU-free in host CI.
 
 ncclResult_t IbCastMakeVDeviceInternal(int* d, ncclNetVDeviceProps_t* props) {
   // On AINIC, NIC fusion (cast) is disabled by default: each NIC runs independently.
