@@ -101,19 +101,27 @@ The runner script sets all of these.
   prebuilt librccl.so.1.0 + getHostName shim.
 - NCCL_DEBUG WARN "cuMem support requires Linux kernel >= 6.8" is printed
   (host kernel is 5.15) but is NON-FATAL: registration proceeds via IPC.
-- UBR_MultiSegment.Generic @ -np 2: PASSED (2.6 s). Log confirms the real
-  multi-segment path:
-      numSegments 4 ... IPC register buffer ... register success ... [ OK ]
+- Full suite @ -np 2  ->  4 PASSED, 2 SKIPPED, 0 FAILED:
+      UBR_MultiSegment.Generic              OK   (device-only, numSegments 4)
+      UBR_MultiSegment.Generic_Reuse        OK   (handle reuse)
+      UBR_MultiSegment.Symmetric_Lsa        OK   (symmetric window, LSA)
+      UBR_MultiSegment.Symmetric_Elastic_Lsa OK  (host/sysmem segments)
+      UBR_MultiSegment.Symmetric_LsaGin     SKIP (needs GIN / 2+ nodes)
+      UBR_MultiSegment.Symmetric_Elastic_Gating SKIP (needs NCCL_ELASTIC_BUFFER_REGISTER=0)
+  Logs confirm the real multi-segment branch: "numSegments 4 ... register success".
+- IMPORTANT: the suite's REGLogChecker parses the INFO-level "numSegments N" REG
+  line, so you MUST run with NCCL_DEBUG=INFO and NCCL_DEBUG_SUBSYS=INIT,REG
+  (WARN-only makes hasNumSegments() fail). The runner sets this.
 - @ -np 8 over loopback the first case stalled (no progress after the banner).
   Treat np=8 as a separate scaling/transport item, not a code failure.
 
 
 6. STILL TO CHECK / open items
 ------------------------------
-a) Run the remaining 5 cases individually at -np 2 and record pass/skip/fail:
-   Generic_Reuse, Symmetric_Lsa, Symmetric_LsaGin (may SKIP if no GIN),
-   Symmetric_Elastic_Lsa (host/sysmem segments; needs ROCm >= 7.12 host alloc),
-   Symmetric_Elastic_Gating.
+a) [DONE @ -np 2] Generic, Generic_Reuse, Symmetric_Lsa, Symmetric_Elastic_Lsa
+   PASS; Symmetric_LsaGin and Symmetric_Elastic_Gating SKIP (see above).
+   To exercise the gating rejection case, re-run Symmetric_Elastic_Gating with
+   NCCL_ELASTIC_BUFFER_REGISTER=0.
 b) Root-cause the -np 8 stall on loopback (bootstrap/socket vs resource). Try
    -np 4, a non-loopback NCCL_SOCKET_IFNAME, and NCCL_DEBUG=INFO SUBSYS=INIT,NET.
 c) Re-run on a kernel >= 6.8 host so cuMem is fully enabled (removes the WARN)
@@ -123,6 +131,14 @@ d) Ideally rebuild librccl + rccl-UnitTestsMPI cleanly in the SAME 7.14 image
    amdsmi_wrap.h fabric-type mismatch (AMDSMI_FABRIC_DIRECT) under that image.
 e) Multi-node multi-segment stays OUT OF SCOPE until the HIP/HSA dmabuf export
    fix lands (AIRUNTIME-2351); the suite self-skips on >1 node.
+
+
+8. Test change shipped alongside this harness
+----------------------------------------------
+test/RegistrationMPITests.cpp UBR_MultiSegment now mirrors DeviceApiTests
+(PR #9599): registration is checked by return code and an unsupported config
+(ncclInvalidUsage, e.g. cuMem/symmetric disabled on older drivers) is reported
+as GTEST_SKIP instead of a hard failure. Only unexpected errors still FAIL.
 
 
 7. Files in this folder

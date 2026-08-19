@@ -84,13 +84,15 @@ echo "=== LINK OK: $BIN ==="
 # 6) Required RCCL env for the UBR_MultiSegment prerequisites.
 export NCCL_CUMEM_ENABLE=1 NCCL_WIN_ENABLE=1 NCCL_MULTI_SEGMENT_REGISTER=1
 export NCCL_LOCAL_REGISTER=1 RCCL_MPI_LOG_ALL_RANKS=1
-export NCCL_SOCKET_IFNAME=lo NCCL_DEBUG=WARN
+# The suite's REGLogChecker parses the INFO-level "numSegments N" REG line to
+# confirm the multi-segment branch fired, so INFO + REG subsys are REQUIRED.
+export NCCL_SOCKET_IFNAME=lo NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,REG
 export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((NP-1)))
 
 echo "=== run $FILTER  (mpirun -np $NP, single node) ==="
 mpirun --allow-run-as-root -np "$NP" --bind-to none \
   --mca btl ^openib --mca coll ^hcoll --mca pml ob1 \
   -x LD_LIBRARY_PATH -x NCCL_CUMEM_ENABLE -x NCCL_WIN_ENABLE -x NCCL_MULTI_SEGMENT_REGISTER \
-  -x NCCL_LOCAL_REGISTER -x RCCL_MPI_LOG_ALL_RANKS -x NCCL_SOCKET_IFNAME -x NCCL_DEBUG -x HIP_VISIBLE_DEVICES \
+  -x NCCL_LOCAL_REGISTER -x RCCL_MPI_LOG_ALL_RANKS -x NCCL_SOCKET_IFNAME -x NCCL_DEBUG -x NCCL_DEBUG_SUBSYS -x HIP_VISIBLE_DEVICES \
   "$BIN" --gtest_filter="$FILTER"
 echo "=== mpirun rc=$? ==="
