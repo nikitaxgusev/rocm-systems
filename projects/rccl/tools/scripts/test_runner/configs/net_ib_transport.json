@@ -12,10 +12,14 @@
   "mpi_args": {
     "mellanox": "--mca oob_tcp_if_include eth1 --mca btl_tcp_if_include eth1 --mca btl ^vader,openib --bind-to none",
     "ainic": "--mca oob_tcp_if_include eno0 --mca btl_tcp_if_include eno0 --mca btl ^vader,openib --bind-to none",
+    "ainic_cts": "--mca oob_tcp_if_include eno0 --mca btl_tcp_if_include eno0 --mca btl ^vader,openib --bind-to none",
     "thor2": "--oversubscribe --mca plm_rsh_agent srun --mca oob_tcp_if_include eno8303 --mca btl_tcp_if_include eno8303 --mca btl ^openib --bind-to none"
   },
   "env_variables": {
-    "NCCL_DEBUG": "INFO"
+    "NCCL_DEBUG": "INFO",
+    "NCCL_NET": "IB-CAST",
+    "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "2",
+    "RCCL_CTS_OFFLOAD_ENABLED": "0"
   },
   "system_env_variables": {
     "mellanox": {
@@ -27,7 +31,14 @@
     "ainic": {
       "NCCL_SOCKET_IFNAME": "eno0",
       "NCCL_IB_HCA": "rdma0,rdma1,rdma2,rdma3",
-      "NCCL_NET_FORCE_MERGE": "rdma0,rdma1;rdma2,rdma3"
+      "NCCL_NET_FORCE_MERGE": "rdma0,rdma1;rdma2,rdma3",
+      "RCCL_CTS_OFFLOAD_ENABLED": "0"
+    },
+    "ainic_cts": {
+      "NCCL_SOCKET_IFNAME": "eno0",
+      "NCCL_IB_HCA": "rdma0,rdma1,rdma2,rdma3",
+      "NCCL_NET_FORCE_MERGE": "rdma0,rdma1;rdma2,rdma3",
+      "RCCL_CTS_OFFLOAD_ENABLED": "1"
     },
     "thor2": {
       "NCCL_SOCKET_IFNAME": "eno8303",
@@ -455,7 +466,9 @@
 
     "cast_base": {
       "extends": "net_ib_base",
+      "description": "White-box QP scheduler tests. The matching scheme is pinned back to auto here on purpose: BY_ORDER pins the scheduler, WRR and split-data off, so under the global BY_ORDER setting these tests could no longer observe what they assert.",
       "env_variables": {
+        "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "-2",
         "RCCL_IB_QP_SCHED_ENABLE":          "1",
         "RCCL_IB_QP_SCHED_WRR_ENABLE":      "1",
         "RCCL_IB_QP_SCHED_WEIGHT":          "0",

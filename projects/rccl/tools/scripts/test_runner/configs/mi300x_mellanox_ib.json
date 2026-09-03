@@ -11,12 +11,16 @@
   "auto_detect_hosts": true,
   "mpi_args": {
     "mellanox": "--mca oob_tcp_if_include eth1 --mca btl_tcp_if_include eth1 --mca btl ^vader,openib --bind-to none",
-    "ainic": "--bind-to numa --mca pml ob1 --mca osc ^ucx --mca btl tcp,self --mca btl_tcp_if_include eno0"
+    "ainic": "--bind-to numa --mca pml ob1 --mca osc ^ucx --mca btl tcp,self --mca btl_tcp_if_include eno0",
+    "ainic_cts": "--bind-to numa --mca pml ob1 --mca osc ^ucx --mca btl tcp,self --mca btl_tcp_if_include eno0"
   },
   "env_variables": {
     "HSA_NO_SCRATCH_RECLAIM": "1",
     "NCCL_SOCKET_IFNAME": "eth0,eth1",
-    "NCCL_DEBUG": "INFO"
+    "NCCL_DEBUG": "INFO",
+    "NCCL_NET": "IB-CAST",
+    "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "2",
+    "RCCL_CTS_OFFLOAD_ENABLED": "0"
   },
   "system_env_variables": {
     "mellanox": {
@@ -26,7 +30,15 @@
       "NCCL_SOCKET_IFNAME": "eno0",
       "RCCL_AINIC_ROCE": "1",
       "IONIC_LOCKFREE": "all",
-      "NCCL_IB_HCA": "rdma,roce"
+      "NCCL_IB_HCA": "rdma,roce",
+      "RCCL_CTS_OFFLOAD_ENABLED": "0"
+    },
+    "ainic_cts": {
+      "NCCL_SOCKET_IFNAME": "eno0",
+      "RCCL_AINIC_ROCE": "1",
+      "IONIC_LOCKFREE": "all",
+      "NCCL_IB_HCA": "rdma,roce",
+      "RCCL_CTS_OFFLOAD_ENABLED": "1"
     }
   },
   "build_configuration": {

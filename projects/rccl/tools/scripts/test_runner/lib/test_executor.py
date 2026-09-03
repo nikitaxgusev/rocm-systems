@@ -1242,11 +1242,13 @@ class TestExecutor:
             # Non-MPI test - prepend environment variables to the command.
             # LD_LIBRARY_PATH is already merged with correct priority order above,
             # so skip it in the merged_env loop and use the final env value instead.
+            # Values are quoted: NCCL_NET_FORCE_MERGE separates NIC groups with
+            # ';', which the shell would otherwise read as a command separator.
             env_prefix = ""
             for key, value in merged_env.items():
                 if key != 'LD_LIBRARY_PATH':
-                    env_prefix += f"{key}={value} "
-            env_prefix += f"LD_LIBRARY_PATH={env['LD_LIBRARY_PATH']} "
+                    env_prefix += f"{key}={shlex.quote(str(value))} "
+            env_prefix += f"LD_LIBRARY_PATH={shlex.quote(str(env['LD_LIBRARY_PATH']))} "
 
             # Build the program (binary + args) as one string so the same
             # locked-memory wrapper used on the MPI path applies here too.
