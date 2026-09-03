@@ -8,12 +8,29 @@
     "rocm_path": "${ROCM_PATH:-/opt/rocm}",
     "mpi_path": "${MPI_PATH:-/opt/ompi}"
   },
+  "auto_detect_hosts": true,
+  "mpi_args": {
+    "mellanox": "--mca oob_tcp_if_include eth1 --mca btl_tcp_if_include eth1 --mca btl ^vader,openib --bind-to none",
+    "ainic": "--bind-to numa --mca pml ob1 --mca osc ^ucx --mca btl tcp,self --mca btl_tcp_if_include eno0"
+  },
   "env_variables": {
     "HSA_NO_SCRATCH_RECLAIM": "1",
     "NCCL_SOCKET_IFNAME": "eth0,eth1",
     "NCCL_DEBUG": "INFO"
   },
+  "system_env_variables": {
+    "mellanox": {
+      "NCCL_SOCKET_IFNAME": "eth0,eth1"
+    },
+    "ainic": {
+      "NCCL_SOCKET_IFNAME": "eno0",
+      "RCCL_AINIC_ROCE": "1",
+      "IONIC_LOCKFREE": "all",
+      "NCCL_IB_HCA": "rdma,roce"
+    }
+  },
   "build_configuration": {
+    "description": "Targets the Mellanox home system (gfx942). On AINIC (gfx950) build once elsewhere - e.g. configs/ainic.json, whose install_flags carry --amdgpu_targets gfx950 - and run this config with --no-build plus RCCL_BUILD_DIR, since build_configuration cannot be keyed per --system.",
     "install_flags": ["--debug", "-t", "-l", "--log-trace", "--enable-code-coverage", "--enable-mpi-tests", "--no_clean"],
     "cmake_options": "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DEMIT_LLVM_IR=ON -DBITCODE_LIB_ARCH=gfx942",
     "parallel_jobs": 64
@@ -694,6 +711,139 @@
         }
       ]
     },
+    "cast_by_order_base": {
+      "extends": "net_ib_base",
+      "num_ranks": 2,
+      "num_nodes": 2,
+      "num_gpus": 8,
+      "timeout": 300,
+      "description": "BY_ORDER receive-matching validation. Requests BY_ORDER explicitly and deliberately leaves the QP scheduler, WRR and split-data knobs ON: the transport must pin them off for BY_ORDER rather than mis-attribute completions. Derived suites pick the CTS-offload mode; tests are inherited.",
+      "env_variables": {
+        "NCCL_NET": "IB-CAST",
+        "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "2",
+        "NCCL_IB_QPS_PER_CONNECTION": "2",
+        "NCCL_IB_SPLIT_DATA_ON_QPS": "1",
+        "RCCL_IB_QP_SCHED_ENABLE": "1",
+        "RCCL_IB_QP_SCHED_WRR_ENABLE": "1",
+        "NCCL_DEBUG": "INFO",
+        "NCCL_DEBUG_SUBSYS": "NET,INIT,ENV"
+      },
+      "tests": [
+        {
+          "name": "ByOrder_SimpleSendRecv",
+          "description": "Single host-memory send/recv over the BY_ORDER path",
+          "test_filter": "NetIbMPITest.SimpleSendRecv"
+        },
+        {
+          "name": "ByOrder_SendRecvMultipleSizes",
+          "description": "Size sweep on one connection: every request must match its own completion",
+          "test_filter": "NetIbMPITest.SendRecvMultipleSizes"
+        },
+        {
+          "name": "ByOrder_SendRecvZeroSize",
+          "description": "Zero-byte transfer, the degenerate case for per-request wr_id matching",
+          "test_filter": "NetIbMPITest.SendRecvZeroSize"
+        },
+        {
+          "name": "ByOrder_MultipleOutstandingSendRecv",
+          "description": "Several requests in flight at once: completions must not be attributed to the wrong request",
+          "test_filter": "NetIbMPITest.MultipleOutstandingSendRecv"
+        },
+        {
+          "name": "ByOrder_MultiRecv",
+          "description": "irecv(n=8) batching, sequential tag order, over the BY_ORDER path",
+          "test_filter": "NetIbMPITest.MultiRecv"
+        },
+        {
+          "name": "ByOrder_MultiRecvShuffled",
+          "description": "Shuffled recv-slot and send-issue order, where per-request matching matters most",
+          "test_filter": "NetIbMPITest.MultiRecvShuffled"
+        },
+        {
+          "name": "ByOrder_MultiRecvGPUShuffled",
+          "description": "Shuffled irecv batching over GPU memory (GDR); skipped if GDR is unavailable",
+          "test_filter": "NetIbMPITest.MultiRecvGPUShuffled"
+        },
+        {
+          "name": "ByOrder_LargeTransfer",
+          "description": "Large single transfer with split-data requested but pinned off by BY_ORDER",
+          "test_filter": "NetIbMPITest.LargeTransfer"
+        }
+      ]
+    },
+
+    "cast_by_order_no_cts": {
+      "extends": "cast_by_order_base",
+      "description": "Validation case 1: BY_ORDER with CTS offload OFF (the path PR #11172 enables). recvMatchingScheme must resolve to 2 with software CTS and on-demand recv posting.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "0",
+        "RCCL_IB_P2P_DISABLE_CTS": "1"
+      }
+    },
+
+    "cast_by_order_cts": {
+      "extends": "cast_by_order_base",
+      "description": "Validation case 2: BY_ORDER with CTS offload ON, which forced BY_ORDER even before this change. Guards against regressing the path that already worked.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "1"
+      }
+    },
+
+    "cast_by_order_perf_base": {
+      "is_gtest": false,
+      "num_ranks": 16,
+      "num_nodes": 2,
+      "num_gpus": 8,
+      "timeout": 900,
+      "description": "rccl-tests counterpart of the BY_ORDER unit validation: collectives with correctness checking over the same knob combination. Derived suites pick the CTS-offload mode.",
+      "env_variables": {
+        "NCCL_NET": "IB-CAST",
+        "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "2",
+        "NCCL_IB_QPS_PER_CONNECTION": "2",
+        "NCCL_IB_SPLIT_DATA_ON_QPS": "1",
+        "RCCL_IB_QP_SCHED_ENABLE": "1",
+        "RCCL_IB_QP_SCHED_WRR_ENABLE": "1",
+        "NCCL_DEBUG": "WARN"
+      },
+      "tests": [
+        {
+          "name": "ByOrder_alltoall_perf",
+          "binary": "${RCCL_PERF_BIN:-${RCCL_TESTS_DIR:-$PWD/rccl-tests}/build}/alltoall_perf",
+          "command_args": "-b 1024 -e 1G -f 2 -g 1 -c 1 -n 20 -w 2",
+          "description": "alltoall 1K..1G with correctness checking on the BY_ORDER path"
+        },
+        {
+          "name": "ByOrder_allreduce_perf",
+          "binary": "${RCCL_PERF_BIN:-${RCCL_TESTS_DIR:-$PWD/rccl-tests}/build}/all_reduce_perf",
+          "command_args": "-b 1024 -e 1G -f 2 -g 1 -c 1 -n 20 -w 2",
+          "description": "allreduce 1K..1G with correctness checking on the BY_ORDER path"
+        },
+        {
+          "name": "ByOrder_sendrecv_perf",
+          "binary": "${RCCL_PERF_BIN:-${RCCL_TESTS_DIR:-$PWD/rccl-tests}/build}/sendrecv_perf",
+          "command_args": "-b 1024 -e 256M -f 2 -g 1 -c 1 -n 20 -w 2",
+          "description": "point-to-point sendrecv, the collective closest to the raw BY_ORDER send/recv path"
+        }
+      ]
+    },
+
+    "cast_by_order_no_cts_perf": {
+      "extends": "cast_by_order_perf_base",
+      "description": "Validation case 1 (rccl-tests): BY_ORDER with CTS offload OFF.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "0",
+        "RCCL_IB_P2P_DISABLE_CTS": "1"
+      }
+    },
+
+    "cast_by_order_cts_perf": {
+      "extends": "cast_by_order_perf_base",
+      "description": "Validation case 2 (rccl-tests): BY_ORDER with CTS offload ON.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "1"
+      }
+    },
+
     "unit_tests_fixtures": {
       "is_gtest": true,
       "binary": "rccl-UnitTestsFixtures",
@@ -2905,67 +3055,67 @@
 
     "net_ib_initialization_cast": {
       "extends": "net_ib_initialization",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_properties_cast": {
       "extends": "net_ib_properties",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_connection_cast": {
       "extends": "net_ib_connection",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_memory_cast": {
       "extends": "net_ib_memory",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_transfer_cast": {
       "extends": "net_ib_transfer",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_coverage_env_cast": {
       "extends": "net_ib_coverage_env",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_multirecv_cast": {
       "extends": "net_ib_multirecv",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_cts_stress_cast": {
       "extends": "net_ib_cts_stress",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_branch_coverage_cast": {
       "extends": "net_ib_branch_coverage",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_cast": {
       "extends": "net_ib_stress",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_4rank_cast": {
       "extends": "net_ib_stress_4rank",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_multi_qp_split_cast": {
       "extends": "net_ib_stress_multi_qp_split",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_multi_qp_nosplit_cast": {
       "extends": "net_ib_stress_multi_qp_nosplit",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_multi_qp_fanin_cast": {
       "extends": "net_ib_stress_multi_qp_fanin",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_ar_cast": {
       "extends": "net_ib_stress_ar",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "net_ib_stress_inline_cast": {
       "extends": "net_ib_stress_inline",
-      "env_variables": { "NCCL_NET": "ib-cast" }
+      "env_variables": { "NCCL_NET": "IB-CAST" }
     },
     "nccl4py_build_smoke": {
       "extends": "default",
@@ -4309,6 +4459,30 @@
       "name": "NET IB - CTS Depth Stress (ib-cast)",
       "description": "InfiniBand CTS depth stress via ib-cast plugin (NCCL_NET=ib-cast)",
       "config": "net_ib_cts_stress_cast",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER no CTS-offload (unit)",
+      "description": "Validation case 1: BY_ORDER receive matching with CTS offload off, over the plugin send/recv and multi-recv paths",
+      "config": "cast_by_order_no_cts",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER with CTS-offload (unit)",
+      "description": "Validation case 2: BY_ORDER receive matching with CTS offload on, guarding the path that already forced BY_ORDER",
+      "config": "cast_by_order_cts",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER no CTS-offload (rccl-tests)",
+      "description": "Validation case 1 over collectives: alltoall, allreduce and sendrecv with correctness checking",
+      "config": "cast_by_order_no_cts_perf",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER with CTS-offload (rccl-tests)",
+      "description": "Validation case 2 over collectives: alltoall, allreduce and sendrecv with correctness checking",
+      "config": "cast_by_order_cts_perf",
       "enabled": true
     },
     {

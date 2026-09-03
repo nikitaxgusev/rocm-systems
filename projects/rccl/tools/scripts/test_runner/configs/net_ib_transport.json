@@ -489,11 +489,6 @@
           "test_filter": "NetIbMPITest.CastSplitDataThresholdBoundary"
         },
         {
-          "name": "Cast_EnableDisableSched",
-          "description": "Toggle schedEnable mid-connection: enabled=1 token, disabled=0 tokens, re-enabled=1 token",
-          "test_filter": "NetIbMPITest.CastEnableDisableSched"
-        },
-        {
           "name": "Cast_SendRecvMultipleSizes",
           "description": "Sizes across split/WRR threshold: below threshold→1 token each; at/above threshold→0 tokens; data integrity verified",
           "test_filter": "NetIbMPITest.CastSendRecvMultipleSizes"
@@ -520,14 +515,32 @@
       },
       "tests": [
         {
-          "name": "Cast_WeightsDistributionOneRound",
-          "description": "Two-phase WRR distribution: equal then triangular weights — both exhaust all active tokens after one full round",
-          "test_filter": "NetIbMPITest.CastWeightsDistributionOneRound"
-        },
-        {
           "name": "Cast_SchedParmsReflectEnvVars",
           "description": "schedParms inside sendComm matches env: schedEnable=true, doWrr=true, splitDataMin=65536",
           "test_filter": "NetIbMPITest.CastSchedParmsReflectEnvVars"
+        }
+      ]
+    },
+
+    "cast_wrr_toggle": {
+      "extends": "cast_base",
+      "timeout": 120,
+      "description": "Toggles schedEnable/doWrr/splitData on an established connection. These tests need an update interval longer than the test itself, otherwise the scheduler's periodic refresh overwrites the schedParms they set; under the cast_base interval of 50us they skip unconditionally.",
+      "env_variables": {
+        "NCCL_IB_QPS_PER_CONNECTION": "2",
+        "NCCL_IB_SPLIT_DATA_ON_QPS":  "1",
+        "RCCL_IB_QP_SCHED_UPDATE_INTERVAL": "10000000"
+      },
+      "tests": [
+        {
+          "name": "Cast_EnableDisableSched",
+          "description": "Toggle schedEnable mid-connection: enabled=1 token, disabled=0 tokens, re-enabled=1 token",
+          "test_filter": "NetIbMPITest.CastEnableDisableSched"
+        },
+        {
+          "name": "Cast_WeightsDistributionOneRound",
+          "description": "Two-phase WRR distribution: equal then triangular weights — both exhaust all active tokens after one full round",
+          "test_filter": "NetIbMPITest.CastWeightsDistributionOneRound"
         },
         {
           "name": "Cast_AlternatingWrrNonWrr",
@@ -614,70 +627,70 @@
     "net_ib_initialization_cast": {
       "extends": "net_ib_initialization",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_properties_cast": {
       "extends": "net_ib_properties",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_connection_cast": {
       "extends": "net_ib_connection",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_memory_cast": {
       "extends": "net_ib_memory",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_transfer_cast": {
       "extends": "net_ib_transfer",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_flush_cast": {
       "extends": "net_ib_flush",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_vdevice_cast": {
       "extends": "net_ib_vdevice",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_vnic_functional_cast": {
       "extends": "net_ib_vnic_functional",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_vnic_edge_cast": {
       "extends": "net_ib_vnic_edge",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
     "net_ib_vnic_stress_cast": {
       "extends": "net_ib_vnic_stress",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
 
@@ -846,7 +859,7 @@
       "extends": "net_ib_base",
       "timeout": 120,
       "env_variables": {
-        "NCCL_NET": "ib"
+        "NCCL_NET": "IB"
       },
       "tests": [
         { "name": "NetIB_GIN_PeerMem_IPutSignalZeroSize_Ctx1", "description": "GIN peermem: iput signal zero size (Ctx1, RegMr)", "test_filter": "CtxOnly/RmaMPIFixedSizeTest.IPutSignalZeroSize/Ctx1_RegMr" },
@@ -907,7 +920,7 @@
       "extends": "net_ib_base",
       "timeout": 120,
       "env_variables": {
-        "NCCL_NET": "ib"
+        "NCCL_NET": "IB"
       },
       "tests": [
         { "name": "NetIB_GIN_DmaBuf_IPutSignalZeroSize_Ctx1", "description": "GIN dmabuf: iput signal zero size (Ctx1, DmaBuf)", "test_filter": "CtxOnly/RmaMPIFixedSizeTest.IPutSignalZeroSize/Ctx1_DmaBuf" },
@@ -967,13 +980,13 @@
     "net_ib_cast_gin_peermem": {
       "extends": "net_ib_gin_peermem",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
     "net_ib_cast_gin_dmabuf": {
       "extends": "net_ib_gin_dmabuf",
       "env_variables": {
-        "NCCL_NET": "ib-cast"
+        "NCCL_NET": "IB-CAST"
       }
     },
     "net_ib_multithread_independent": {
@@ -1007,9 +1020,191 @@
     "net_ib_multithread_independent_16": {
       "extends": "net_ib_multithread_independent",
       "command_args": "--net_ib_nthreads=16"
+    },
+
+    "cast_by_order_base": {
+      "extends": "net_ib_base",
+      "timeout": 300,
+      "description": "BY_ORDER receive-matching validation. Requests BY_ORDER explicitly and deliberately leaves the QP scheduler, WRR and split-data knobs ON: the transport must pin them off for BY_ORDER (splitDataOnQps=0) rather than mis-attribute completions. Derived suites pick the CTS-offload mode; tests are inherited.",
+      "env_variables": {
+        "NCCL_NET": "IB-CAST",
+        "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "2",
+        "NCCL_IB_QPS_PER_CONNECTION": "2",
+        "NCCL_IB_SPLIT_DATA_ON_QPS": "1",
+        "RCCL_IB_QP_SCHED_ENABLE": "1",
+        "RCCL_IB_QP_SCHED_WRR_ENABLE": "1",
+        "NCCL_DEBUG": "INFO",
+        "NCCL_DEBUG_SUBSYS": "NET,INIT,ENV"
+      },
+      "tests": [
+        {
+          "name": "ByOrder_SimpleSendRecv",
+          "description": "Single host-memory send/recv over the BY_ORDER path",
+          "test_filter": "NetIbMPITest.SimpleSendRecv"
+        },
+        {
+          "name": "ByOrder_SendRecvMultipleSizes",
+          "description": "Size sweep on one connection: every request must match its own completion",
+          "test_filter": "NetIbMPITest.SendRecvMultipleSizes"
+        },
+        {
+          "name": "ByOrder_SendRecvZeroSize",
+          "description": "Zero-byte transfer, the degenerate case for per-request wr_id matching",
+          "test_filter": "NetIbMPITest.SendRecvZeroSize"
+        },
+        {
+          "name": "ByOrder_MultipleOutstandingSendRecv",
+          "description": "Several requests in flight at once; BY_ORDER must not cross-attribute their completions",
+          "test_filter": "NetIbMPITest.MultipleOutstandingSendRecv"
+        },
+        {
+          "name": "ByOrder_MultipleSequentialTransfers",
+          "description": "Sequential reuse of one connection over many transfers",
+          "test_filter": "NetIbMPITest.MultipleSequentialTransfers"
+        },
+        {
+          "name": "ByOrder_MultiRecv",
+          "description": "irecv(n=8) batching, sequential tag order - direct exercise of the receive-matching scheme",
+          "test_filter": "NetIbMPITest.MultiRecv"
+        },
+        {
+          "name": "ByOrder_MultiRecvShuffled",
+          "description": "irecv(n=8) batching with shuffled recv-slot and send-issue order: the case BY_INDEX and BY_ORDER resolve differently",
+          "test_filter": "NetIbMPITest.MultiRecvShuffled"
+        },
+        {
+          "name": "ByOrder_MultiRecvGPUShuffled",
+          "description": "Shuffled irecv batching over GPU memory (GDR); skipped if GDR is unavailable",
+          "test_filter": "NetIbMPITest.MultiRecvGPUShuffled"
+        },
+        {
+          "name": "ByOrder_RapidRecvPostDrain",
+          "description": "Rapid recv post/drain cycles - BY_ORDER disables pre-posted WRs, so recvs are posted on demand here",
+          "test_filter": "NetIbMPITest.RapidRecvPostDrain"
+        },
+        {
+          "name": "ByOrder_TagZeroReuse",
+          "description": "Repeated tag-0 reuse, which BY_INDEX disambiguates by slot and BY_ORDER by posted WR",
+          "test_filter": "NetIbMPITest.TagZeroReuse"
+        },
+        {
+          "name": "ByOrder_LargeTransfer",
+          "description": "Large single payload with split-data requested but pinned off by BY_ORDER",
+          "test_filter": "NetIbMPITest.LargeTransfer"
+        },
+        {
+          "name": "ByOrder_MultiQpSplitDataStress",
+          "description": "Multi-QP split-data stress with SPLIT_DATA_ON_QPS=1 requested: data integrity must hold while BY_ORDER keeps splitDataOnQps=0",
+          "test_filter": "NetIbMPITest.MultiQpSplitDataStress"
+        },
+        {
+          "name": "ByOrder_FlushAfterRecv",
+          "description": "GPU flush after a BY_ORDER receive completes",
+          "test_filter": "NetIbMPITest.FlushAfterRecv"
+        }
+      ]
+    },
+
+    "cast_by_order_no_cts": {
+      "extends": "cast_by_order_base",
+      "description": "Validation case 1: BY_ORDER with CTS offload OFF (the path this change enables). recvMatchingScheme must resolve to 2 with software CTS and on-demand recv posting.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "0",
+        "RCCL_IB_P2P_DISABLE_CTS": "1"
+      }
+    },
+
+    "cast_by_order_cts": {
+      "extends": "cast_by_order_base",
+      "description": "Validation case 2: BY_ORDER with CTS offload ON (pre-existing path). Guards against regressions in the offload posting model.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "1"
+      }
+    },
+
+    "cast_by_order_perf_base": {
+      "is_gtest": false,
+      "num_ranks": 16,
+      "num_nodes": 2,
+      "num_gpus": 8,
+      "timeout": 900,
+      "description": "rccl-tests counterpart of the BY_ORDER unit validation: collectives with correctness checking over the same knob combination. Derived suites pick the CTS-offload mode.",
+      "env_variables": {
+        "NCCL_NET": "IB-CAST",
+        "NCCL_IB_RECEIVER_SIDE_MATCHING_SCHEME": "2",
+        "NCCL_IB_QPS_PER_CONNECTION": "2",
+        "NCCL_IB_SPLIT_DATA_ON_QPS": "1",
+        "RCCL_IB_QP_SCHED_ENABLE": "1",
+        "RCCL_IB_QP_SCHED_WRR_ENABLE": "1",
+        "NCCL_DEBUG": "WARN"
+      },
+      "tests": [
+        {
+          "name": "ByOrder_alltoall_perf",
+          "binary": "alltoall_perf",
+          "test_binary_dir": "${RCCL_PERF_BIN:-${WORKDIR}/../rccl-tests/build}",
+          "command_args": "-b 1024 -e 1G -f 2 -g 1 -c 1 -n 20 -w 2",
+          "description": "alltoall 1K..1G with correctness checking on the BY_ORDER path"
+        },
+        {
+          "name": "ByOrder_allreduce_perf",
+          "binary": "all_reduce_perf",
+          "test_binary_dir": "${RCCL_PERF_BIN:-${WORKDIR}/../rccl-tests/build}",
+          "command_args": "-b 1024 -e 1G -f 2 -g 1 -c 1 -n 20 -w 2",
+          "description": "allreduce 1K..1G with correctness checking on the BY_ORDER path"
+        },
+        {
+          "name": "ByOrder_sendrecv_perf",
+          "binary": "sendrecv_perf",
+          "test_binary_dir": "${RCCL_PERF_BIN:-${WORKDIR}/../rccl-tests/build}",
+          "command_args": "-b 1024 -e 256M -f 2 -g 1 -c 1 -n 20 -w 2",
+          "description": "point-to-point sendrecv, the collective closest to the raw BY_ORDER send/recv path"
+        }
+      ]
+    },
+
+    "cast_by_order_no_cts_perf": {
+      "extends": "cast_by_order_perf_base",
+      "description": "Validation case 1 (rccl-tests): BY_ORDER with CTS offload OFF.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "0",
+        "RCCL_IB_P2P_DISABLE_CTS": "1"
+      }
+    },
+
+    "cast_by_order_cts_perf": {
+      "extends": "cast_by_order_perf_base",
+      "description": "Validation case 2 (rccl-tests): BY_ORDER with CTS offload ON.",
+      "env_variables": {
+        "RCCL_CTS_OFFLOAD_ENABLED": "1"
+      }
     }
   },
   "test_suites": [
+    {
+      "name": "NET IB - CAST BY_ORDER no CTS-offload (unit)",
+      "description": "Validation case 1: BY_ORDER requested with CTS offload disabled; scheduler/WRR/split-data requested but must be pinned off",
+      "config": "cast_by_order_no_cts",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER with CTS-offload (unit)",
+      "description": "Validation case 2: BY_ORDER via CTS offload, regression guard for the offload posting model",
+      "config": "cast_by_order_cts",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER no CTS-offload (rccl-tests)",
+      "description": "Validation case 1 over rccl-tests collectives with correctness checking (2 nodes x 8 GPUs)",
+      "config": "cast_by_order_no_cts_perf",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST BY_ORDER with CTS-offload (rccl-tests)",
+      "description": "Validation case 2 over rccl-tests collectives with correctness checking (2 nodes x 8 GPUs)",
+      "config": "cast_by_order_cts_perf",
+      "enabled": true
+    },
     {
       "name": "Bootstrap socket poll - no busy loop",
       "description": "AICOMRCCL-1322: NCCL_SOCKET_POLL_TIMEOUT_MSEC makes a blocked bootstrap socket recv wait in poll() instead of busy-spinning a CPU core (Debug only, no NIC/GPU required)",
@@ -1096,14 +1291,20 @@
     },
     {
       "name": "NET IB - CAST WRR+Split (QPS=2, splitData=1)",
-      "description": "White-box WRR scheduler tests with split-data path enabled: token counts, threshold boundary, split/WRR token accounting, sched enable/disable",
+      "description": "White-box WRR scheduler tests with split-data path enabled: token counts, threshold boundary, split/WRR token accounting",
       "config": "cast_wrr_split",
       "enabled": true
     },
     {
       "name": "NET IB - CAST WRR only (QPS=2, splitData=0)",
-      "description": "White-box WRR scheduler tests without split-data: weights distribution, doWrr toggle, splitData toggle, sched parms reflection",
+      "description": "White-box WRR scheduler test without split-data: sched parms reflection",
       "config": "cast_wrr_no_split",
+      "enabled": true
+    },
+    {
+      "name": "NET IB - CAST WRR toggles (QPS=2, long update interval)",
+      "description": "White-box scheduler/WRR/split-data toggles on an established connection: sched enable/disable, weights distribution, doWrr toggle, splitData toggle",
+      "config": "cast_wrr_toggle",
       "enabled": true
     },
     {
