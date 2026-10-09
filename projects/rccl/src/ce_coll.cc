@@ -9,6 +9,7 @@
 #include "register_inline.h"
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cuda.h>
 #include "rocmwrap.h"
 #include "ce_coll.h"
@@ -524,6 +525,31 @@ ncclResult_t ncclPrepMCSync(struct ncclComm* comm, bool isComplete, hipStreamBat
   fail:
   goto exit;
 }
+
+// HIP's hipStreamBatchMemOp WRITE_VALUE has no implicit system-scope release
+// (unlike CUDA's CU_STREAM_WRITE_VALUE_DEFAULT), so peer writes issued earlier
+// in the stream, e.g. small D2D copies into a peer's scratch, can become
+// visible after the flag. Record a release-to-system event before the flag
+// writes. RCCL_CE_SYNC_RELEASE=0 disables it.
+RCCL_PARAM(CeSyncRelease, "CE_SYNC_RELEASE", 1);
+
+static ncclResult_t ncclCeSyncReleaseFence(struct ncclComm* comm, cudaStream_t stream) {
+  if (!rcclParamCeSyncRelease()) return ncclSuccess;
+  static std::mutex mtx;
+  static hipEvent_t events[MAX_ALLOC_TRACK_NGPU] = {};
+  if (comm->cudaDev < 0 || comm->cudaDev >= MAX_ALLOC_TRACK_NGPU) return ncclSuccess;
+  hipEvent_t ev;
+  {
+    std::lock_guard<std::mutex> lock(mtx);
+    if (events[comm->cudaDev] == nullptr) {
+      CUDACHECK(hipEventCreateWithFlags(&events[comm->cudaDev], hipEventDisableTiming | hipEventReleaseToSystem));
+    }
+    ev = events[comm->cudaDev];
+  }
+  CUDACHECK(hipEventRecord(ev, stream));
+  return ncclSuccess;
+}
+
 // Capture: issue peer writes as a separate stream batch so the captured graph
 // orders write → wait → reset (reset is a second batch in ncclMemOpSync). Fusing
 // write+wait+reset in one HIP batch can hang on replay.
@@ -550,6 +576,7 @@ static ncclResult_t ncclPrepUCSyncCapture(struct ncclComm* comm, bool isComplete
     writeIdx++;
   }
   if (writeIdx) {
+    NCCLCHECKGOTO(ncclCeSyncReleaseFence(comm, stream), ret, fail);
     CUCHECKGOTO(hipStreamBatchMemOp(stream, writeIdx, writeParams, 0), ret, fail);
   }
 
@@ -672,6 +699,7 @@ ncclResult_t ncclMemOpSync(struct ncclComm* comm, cudaStream_t stream, struct nc
   // wait for the wait ops, so a reset can clobber a peer's flag mid-barrier
   // and hang graph replay. Issuing them as a separate, stream-ordered batch
   // forces reset-after-wait.
+  NCCLCHECKGOTO(ncclCeSyncReleaseFence(comm, stream), ret, fail);
   CUCHECKGOTO(hipStreamBatchMemOp(stream, opIdx, batchParams, 0), ret, fail);
 
   // For graph capture, reset our flag array to 0 in a separate batch so the
