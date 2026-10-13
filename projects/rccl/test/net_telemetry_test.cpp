@@ -35,6 +35,10 @@
  * than the histogram and min/max is untouched by N, and N == 1 is not a special
  * case of the new code but literally the old behaviour, bucket for bucket.
  *
+ * HW counter rows list alternative driver spellings. testHwCounterResolve()
+ * feeds the real Thor2 table the sysfs names of the upstream and the Broadcom
+ * out-of-tree bnxt_re driver and checks which key each counter resolves to.
+ *
  * net_telemetry.cc depends only on libc + pthread, so this links directly
  * against it with no RCCL build system and no hardware:
  *
@@ -923,6 +927,131 @@ static void testConcurrent(void) {
   resetState();
 }
 
+/* ---- HW counter name resolution -------------------------------------- */
+
+/* A fake counter source: the listed keys exist, everything else reads -1. */
+struct FakeKeys {
+  const char* const* names;
+  int n;
+};
+
+static int64_t fakeRead(const char* key, void* ctx) {
+  const FakeKeys* f = (const FakeKeys*)ctx;
+  for (int i = 0; i < f->n; i++)
+    if (std::strcmp(f->names[i], key) == 0) return 100 + i;
+  return -1;
+}
+
+static void checkKey(const char* driver, const char* json, const FakeKeys* f,
+                     const char* expected, int line) {
+  const char* key = NULL;
+  int64_t v = rcclTelemetryHwCounterResolve(driver, json, fakeRead, (void*)f, &key);
+  if (v < 0 || key == NULL || std::strcmp(key, expected) != 0) {
+    std::printf("  FAIL: %s/%s resolved to %s (%lld), expected %s  (line %d)\n",
+                driver, json, key ? key : "(none)", (long long)v, expected, line);
+    g_failures++;
+  }
+}
+#define CHECK_KEY(driver, json, f, expected) checkKey(driver, json, f, expected, __LINE__)
+
+/* port 1 hw_counters of bnxt_re0 with the Broadcom out-of-tree driver 233.2.108.0 */
+static const char* const kBnxtOot233[] = {
+  "active_ahs", "active_cqs", "active_mrs", "active_mws", "active_pds", "active_qps",
+  "active_rc_qps", "active_srqs", "active_ud_qps", "bad_resp_err", "db_fifo_register",
+  "duplicate_request", "implied_nak_seq_err", "lifespan", "local_ack_timeout_err",
+  "local_protection_err", "local_qp_op_err", "max_retry_exceeded", "mem_mgmt_op_err",
+  "np_cnp_sent", "np_ecn_marked_roce_packets", "out_of_buffer", "out_of_sequence",
+  "pacing_alerts", "pacing_complete", "pacing_reschedule", "packet_seq_err",
+  "recoverable_errors", "remote_op_err", "req_cqe_error", "req_cqe_flush_error",
+  "req_remote_access_errors", "req_remote_invalid_request", "res_cmp_err",
+  "res_cq_load_err", "res_exceed_max", "res_exceeds_wqe", "res_invalid_dup_rkey",
+  "res_irrq_oflow", "res_mem_err", "res_opcode_err", "resp_cqe_error",
+  "resp_cqe_flush_error", "resp_local_length_error", "resp_remote_access_errors",
+  "res_rem_inv_err", "res_rx_domain_err", "res_rx_invalid_rkey", "res_rx_no_perm",
+  "res_rx_pci_err", "res_rx_range_err", "res_srq_err", "res_srq_load_err",
+  "res_tx_domain_err", "res_tx_invalid_rkey", "res_tx_no_perm", "res_tx_pci_err",
+  "res_tx_range_err", "res_unaligned_atomic", "res_unsup_opcode", "res_wqe_format_err",
+  "rnr_nak_retry_err", "roce_adp_retrans", "roce_adp_retrans_to", "roce_slow_restart",
+  "roce_slow_restart_cnps", "roce_slow_restart_trans", "rp_cnp_handled", "rp_cnp_ignored",
+  "rx_atomic_requests", "rx_bytes", "rx_good_bytes", "rx_good_pkts",
+  "rx_icrc_encapsulated", "rx_pkts", "rx_read_requests", "rx_read_resp",
+  "rx_roce_discards", "rx_roce_errors", "rx_send_req", "rx_write_requests",
+  "tx_atomic_req", "tx_bytes", "tx_pkts", "tx_read_req", "tx_read_resp",
+  "tx_roce_discards", "tx_roce_errors", "tx_send_req", "tx_write_req",
+  "unrecoverable_err",
+};
+
+/* Upstream-kernel bnxt_re spellings, plus an out-of-tree synonym of each of
+ * the first two so precedence is exercised. */
+static const char* const kBnxtUpstream[] = {
+  "to_retransmits", "local_ack_timeout_err", "res_oos_drop_count", "out_of_sequence",
+  "seq_err_naks_rcvd", "rnr_naks_rcvd", "dup_req", "missing_resp", "rx_atomic_req",
+};
+
+/* bnxt_en ethtool -S: link-level pause and PFC totals both exist. */
+static const char* const kBnxtEthtool[] = {
+  "rx_pause_frames", "tx_pause_frames", "rx_pfc_frames", "tx_pfc_frames",
+  "rx_pfc_ena_frames_pri3", "tx_pfc_ena_frames_pri3",
+};
+
+#define FAKE_KEYS(arr) { (arr), (int)(sizeof(arr) / sizeof((arr)[0])) }
+
+/* Thor2 counters must resolve under both the upstream and the Broadcom
+ * out-of-tree bnxt_re naming, the first listed spelling must win when both
+ * exist, and the PFC rows must read PFC frames, not 802.3x pause frames. */
+static void testHwCounterResolve(void) {
+  std::printf("testHwCounterResolve\n");
+  const FakeKeys oot = FAKE_KEYS(kBnxtOot233);
+  const FakeKeys up = FAKE_KEYS(kBnxtUpstream);
+  const FakeKeys eth = FAKE_KEYS(kBnxtEthtool);
+
+  const char* drivers[] = { "bnxt_re", "bnxt_en" };
+  for (const char* drv : drivers) {
+    CHECK_KEY(drv, "to_retransmits",        &oot, "local_ack_timeout_err");
+    CHECK_KEY(drv, "local_ack_timeout_err", &oot, "local_ack_timeout_err");
+    CHECK_KEY(drv, "seq_err_naks_rcvd",     &oot, "packet_seq_err");
+    CHECK_KEY(drv, "rnr_retry_err",         &oot, "rnr_nak_retry_err");
+    CHECK_KEY(drv, "max_retry_exceeded",    &oot, "max_retry_exceeded");
+    CHECK_KEY(drv, "oos_drop_count",        &oot, "out_of_sequence");
+    CHECK_KEY(drv, "dup_req",               &oot, "duplicate_request");
+    CHECK_KEY(drv, "missing_resp",          &oot, "implied_nak_seq_err");
+    CHECK_KEY(drv, "rx_errors",             &oot, "rx_roce_errors");
+    CHECK_KEY(drv, "rx_discards",           &oot, "rx_roce_discards");
+    CHECK_KEY(drv, "tx_errors",             &oot, "tx_roce_errors");
+    CHECK_KEY(drv, "tx_discards",           &oot, "tx_roce_discards");
+    CHECK_KEY(drv, "res_mem_error",         &oot, "res_mem_err");
+    CHECK_KEY(drv, "rx_write_req",          &oot, "rx_write_requests");
+    CHECK_KEY(drv, "rx_read_req",           &oot, "rx_read_requests");
+    CHECK_KEY(drv, "rx_atomic_req",         &oot, "rx_atomic_requests");
+    CHECK_KEY(drv, "ecn_marked_pkts",       &oot, "np_ecn_marked_roce_packets");
+    CHECK_KEY(drv, "cnp_handled",           &oot, "rp_cnp_handled");
+    CHECK_KEY(drv, "out_of_buffer",         &oot, "out_of_buffer");
+
+    CHECK_KEY(drv, "to_retransmits",        &up, "to_retransmits");
+    CHECK_KEY(drv, "oos_drop_count",        &up, "res_oos_drop_count");
+    CHECK_KEY(drv, "seq_err_naks_rcvd",     &up, "seq_err_naks_rcvd");
+    CHECK_KEY(drv, "rnr_retry_err",         &up, "rnr_naks_rcvd");
+    CHECK_KEY(drv, "dup_req",               &up, "dup_req");
+    CHECK_KEY(drv, "missing_resp",          &up, "missing_resp");
+    CHECK_KEY(drv, "rx_atomic_req",         &up, "rx_atomic_req");
+
+    CHECK_KEY(drv, "pfc_rx_pause_frames",   &eth, "rx_pfc_frames");
+    CHECK_KEY(drv, "pfc_tx_pause_frames",   &eth, "tx_pfc_frames");
+    CHECK_KEY(drv, "rx_pause_frames",       &eth, "rx_pause_frames");
+    CHECK_KEY(drv, "tx_pause_frames",       &eth, "tx_pause_frames");
+  }
+
+  /* Other profiles keep their own names. */
+  CHECK_KEY("mlx5_core", "oos_drop_count", &oot, "out_of_sequence");
+  CHECK_KEY("mlx5_core", "seq_err_naks_rcvd", &oot, "packet_seq_err");
+
+  const char* key = NULL;
+  CHECK_EQ(rcclTelemetryHwCounterResolve("bnxt_re", "rx_roce_error_pkts", fakeRead, (void*)&oot, &key), -1);
+  CHECK_EQ(rcclTelemetryHwCounterResolve("bnxt_re", "no_such_counter", fakeRead, (void*)&oot, &key), -2);
+  CHECK_EQ(rcclTelemetryHwCounterResolve("e1000e", "to_retransmits", fakeRead, (void*)&oot, &key), -2);
+  CHECK_EQ(rcclTelemetryHwCounterResolve(NULL, "to_retransmits", fakeRead, (void*)&oot, &key), -2);
+}
+
 int main(void) {
   std::printf("net_telemetry unit tests\n");
   testBlockIndex();
@@ -941,6 +1070,7 @@ int main(void) {
   testSamplingSentinel();
   testSamplingCounters();
   testSamplingDefaultIsIdentity();
+  testHwCounterResolve();
   testConcurrent();
 
   if (g_failures == 0) {

@@ -184,6 +184,18 @@ __attribute__((visibility("default")))
 int rcclTelemetrySwCapture(RcclTelemetrySwSnapshot* out, int maxDevs);
 
 /*
+ * Resolve HW counter `json_name` of the profile selected for `driver_name`
+ * ("ionic", "mlx5_core", "bnxt_re", "bnxt_en") the way the sysfs collector
+ * does: its alternative keys are passed to `read` in order and the first
+ * value >= 0 wins (stored key in *key_out if non-NULL). Returns that value,
+ * -1 if no key was readable, or -2 if the driver or counter is unknown.
+ * Lets the name tables be tested without hardware.
+ */
+int64_t rcclTelemetryHwCounterResolve(const char* driver_name, const char* json_name,
+                                      int64_t (*read)(const char* key, void* ctx),
+                                      void* ctx, const char** key_out);
+
+/*
  * Configuration structure - populated from environment variables
  * (RCCL_TELEMETRY_*), or uses defaults if not specified
  */

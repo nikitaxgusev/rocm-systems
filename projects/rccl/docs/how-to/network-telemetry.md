@@ -276,6 +276,41 @@ time series is produced only when `RCCL_TELEMETRY_SAMPLE_MS > 0`, and even then
 it reads only IB sysfs files. The data path itself never reads sysfs or the NIC
 counters.
 
+### Driver naming differences
+
+Each canonical counter lists every known driver spelling, and the first one
+the device exposes is used. This matters for thor2: the upstream kernel
+`bnxt_re` driver and the Broadcom out-of-tree driver (for example 233.x) name
+the same counters differently, and both are supported. The canonical name is
+always the one in the left column.
+
+| Canonical name | Upstream `bnxt_re` | Out-of-tree `bnxt_re` |
+|---|---|---|
+| `to_retransmits` | `to_retransmits` | `local_ack_timeout_err` |
+| `seq_err_naks_rcvd` | `seq_err_naks_rcvd` | `packet_seq_err` |
+| `rnr_retry_err` | `rnr_naks_rcvd` | `rnr_nak_retry_err` |
+| `oos_drop_count` | `res_oos_drop_count` | `out_of_sequence` |
+| `dup_req` | `dup_req` | `duplicate_request` |
+| `missing_resp` | `missing_resp` | `implied_nak_seq_err` |
+| `rx_errors` / `tx_errors` | `rx_errors` / `tx_errors` | `rx_roce_errors` / `tx_roce_errors` |
+| `rx_discards` / `tx_discards` | `rx_discards` / `tx_discards` | `rx_roce_discards` / `tx_roce_discards` |
+| `res_mem_error` | `res_mem_error` | `res_mem_err` |
+| `rx_{write,read,atomic}_req` | `rx_{write,read,atomic}_req` | `rx_{write,read,atomic}_requests` |
+
+On the out-of-tree driver `to_retransmits` and `local_ack_timeout_err` read the
+same counter. All thor2 counters are read from IB sysfs or ethtool, which do not
+need root; `bnxt_re` debugfs is root-only and is not used.
+
+### PFC counters
+
+On thor2, `pfc_rx_pause_frames` / `pfc_tx_pause_frames` are the PFC frame totals
+over all priorities (`bnxt_en` ethtool `rx_pfc_frames` / `tx_pfc_frames`), and
+the `pfc_rx_frames` / `pfc_tx_frames` arrays hold the per-priority values. `rx_pause_frames` /
+`tx_pause_frames` are 802.3x link-level pause frames, a separate flow-control
+mechanism that is normally zero when PFC is enabled. Per-priority pause duration
+is reported only by drivers that expose `pfc_pri<N>_{rx,tx}_duration_us`; the
+out-of-tree thor2 driver does not, so those entries read `-1`.
+
 ## Known limitations
 
 - On the CTS offload path with optional receive completion, the sender issues a

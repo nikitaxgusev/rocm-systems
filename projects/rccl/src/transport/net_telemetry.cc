@@ -277,11 +277,17 @@ enum RcclHwcSource {
   HWC_DEBUGFS
 };
 
+/* Max alternative source keys per counter row. */
+#define RCCL_TEL_HWC_MAX_KEYS 4
+
 typedef struct {
   const char*        json_name;    /* key written to the JSON output */
   enum RcclHwcSource source;       /* where to read the counter from */
-  const char*        key;          /* primary source-specific identifier */
-  const char*        key_fallback; /* optional fallback if primary read is N/A */
+  /* Source-specific names, NULL-terminated when shorter. Drivers rename
+   * counters across versions (bnxt_re upstream vs. Broadcom out-of-tree), so a
+   * row lists every known spelling. They must be synonyms: at most one is
+   * expected to exist, and for sysfs the first readable one wins. */
+  const char*        keys[RCCL_TEL_HWC_MAX_KEYS];
 } RcclHwCounterDesc;
 
 typedef struct {
@@ -313,8 +319,8 @@ typedef struct {
 } RcclHwConfig;
 
 /* Helpers for building counter tables without per-row boilerplate. */
-#define HWC(json, src, key)            { (json), (src), (key), NULL }
-#define HWC_FB(json, src, key, fb)     { (json), (src), (key), (fb) }
+/* HWC(json, src, key, alt_key...): more than RCCL_TEL_HWC_MAX_KEYS keys fails to compile. */
+#define HWC(json, src, ...)            { (json), (src), { __VA_ARGS__ } }
 
 #define RCCL_TEL_HW_TABLE_SIZE(tbl) ((int)(sizeof(tbl) / sizeof((tbl)[0])))
 
@@ -492,8 +498,8 @@ static const RcclHwCounterDesc rcclHwcMlx5[] = {
    * absent on some ConnectX FW (there only rx_pause_ctrl_phy exists). This is
    * the primary PFC-backpressure congestion signal; the per-priority
    * breakdown, when available, is in the pfc_* arrays. */
-  HWC_FB("pfc_rx_pause_frames",     HWC_ETHTOOL, "rx_pause_ctrl_phy", "rx_pause"),
-  HWC_FB("pfc_tx_pause_frames",     HWC_ETHTOOL, "tx_pause_ctrl_phy", "tx_pause"),
+  HWC("pfc_rx_pause_frames",        HWC_ETHTOOL, "rx_pause_ctrl_phy", "rx_pause"),
+  HWC("pfc_tx_pause_frames",        HWC_ETHTOOL, "tx_pause_ctrl_phy", "tx_pause"),
 };
 
 RCCL_TEL_HW_CONFIG(rcclHwConfigMlx5, rcclHwcMlx5, "mlx5",
@@ -511,56 +517,63 @@ RCCL_TEL_HW_CONFIG(rcclHwConfigMlx5, rcclHwcMlx5, "mlx5",
 /* ------------------------------------------------------------------ */
 /* RoCE counters exposed under                                         */
 /*   /sys/class/infiniband/<dev>/ports/<p>/hw_counters/                */
-/* Counter names follow the upstream bnxt_re driver (hw_counters.c).   */
-/* Best-effort: names absent on a given firmware read back as N/A (-1) */
-/* rather than failing, so the table is safe across bnxt_re versions.  */
+/* Each row lists the upstream bnxt_re name first, then the Broadcom   */
+/* out-of-tree driver name (233.x uses mlx5-style names, e.g.          */
+/* to_retransmits -> local_ack_timeout_err). Names absent on a given   */
+/* driver read back as N/A (-1) rather than failing.                   */
 /* Delta bytes/packets come from the IB sysfs rx/tx_bytes counters,    */
 /* which bnxt_re updates per WQE (ethtool L2 stats refresh too slowly).*/
 
 static const RcclHwCounterDesc rcclHwcThor2[] = {
   /* --- Canonical cross-driver counters (shared json_name, bnxt_re sysfs key) --- */
   /* ECN / congestion notification (primary congestion signals) */
-  HWC_FB("ecn_marked_pkts",         HWC_IB_SYSFS, "rx_ecn_marked_pkts", "np_ecn_marked_roce_packets"),
+  HWC("ecn_marked_pkts",            HWC_IB_SYSFS, "rx_ecn_marked_pkts", "np_ecn_marked_roce_packets"),
   HWC("cnp_sent",                   HWC_IB_SYSFS, "np_cnp_sent"),
   HWC("cnp_handled",                HWC_IB_SYSFS, "rp_cnp_handled"),
   HWC("cnp_ignored",                HWC_IB_SYSFS, "rp_cnp_ignored"),
+  HWC("out_of_buffer",              HWC_IB_SYSFS, "out_of_buffer"),
 
   /* Retransmits / timeouts / out-of-sequence (congestion under load) */
-  HWC("to_retransmits",             HWC_IB_SYSFS, "to_retransmits"),
-  HWC("seq_err_naks_rcvd",          HWC_IB_SYSFS, "seq_err_naks_rcvd"),
-  HWC("rnr_retry_err",              HWC_IB_SYSFS, "rnr_naks_rcvd"),
+  HWC("to_retransmits",             HWC_IB_SYSFS, "to_retransmits", "local_ack_timeout_err"),
+  HWC("seq_err_naks_rcvd",          HWC_IB_SYSFS, "seq_err_naks_rcvd", "packet_seq_err"),
+  HWC("rnr_retry_err",              HWC_IB_SYSFS, "rnr_naks_rcvd", "rnr_nak_retry_err"),
   HWC("max_retry_exceeded",         HWC_IB_SYSFS, "max_retry_exceeded"),
-  HWC("local_ack_timeout_err",      HWC_IB_SYSFS, "local_ack_timeout_err"),
-  HWC_FB("oos_drop_count",          HWC_IB_SYSFS, "res_oos_drop_count", "oos_drop_count"),
-  HWC("dup_req",                    HWC_IB_SYSFS, "dup_req"),
-  HWC("missing_resp",               HWC_IB_SYSFS, "missing_resp"),
+  HWC("local_ack_timeout_err",      HWC_IB_SYSFS, "local_ack_timeout_err", "to_retransmits"),
+  HWC("oos_drop_count",             HWC_IB_SYSFS, "res_oos_drop_count", "oos_drop_count",
+                                                  "out_of_sequence"),
+  HWC("dup_req",                    HWC_IB_SYSFS, "dup_req", "duplicate_request"),
+  HWC("missing_resp",               HWC_IB_SYSFS, "missing_resp", "implied_nak_seq_err"),
 
   /* Error / discard counters */
   HWC("bad_resp_err",               HWC_IB_SYSFS, "bad_resp_err"),
   HWC("unrecoverable_err",          HWC_IB_SYSFS, "unrecoverable_err"),
   HWC("recoverable_errors",         HWC_IB_SYSFS, "recoverable_errors"),
-  HWC("rx_errors",                  HWC_IB_SYSFS, "rx_errors"),
-  HWC("rx_discards",                HWC_IB_SYSFS, "rx_discards"),
-  HWC("tx_errors",                  HWC_IB_SYSFS, "tx_errors"),
-  HWC("tx_discards",                HWC_IB_SYSFS, "tx_discards"),
+  HWC("rx_errors",                  HWC_IB_SYSFS, "rx_errors", "rx_roce_errors"),
+  HWC("rx_discards",                HWC_IB_SYSFS, "rx_discards", "rx_roce_discards"),
+  HWC("tx_errors",                  HWC_IB_SYSFS, "tx_errors", "tx_roce_errors"),
+  HWC("tx_discards",                HWC_IB_SYSFS, "tx_discards", "tx_roce_discards"),
   HWC("rx_roce_error_pkts",         HWC_IB_SYSFS, "rx_roce_error_pkts"),
   HWC("rx_roce_discard_pkts",       HWC_IB_SYSFS, "rx_roce_discard_pkts"),
 
   /* Responder resource errors (context for the error rates) */
   HWC("res_rx_pci_err",             HWC_IB_SYSFS, "res_rx_pci_err"),
   HWC("res_tx_pci_err",             HWC_IB_SYSFS, "res_tx_pci_err"),
-  HWC("res_mem_error",              HWC_IB_SYSFS, "res_mem_error"),
+  HWC("res_mem_error",              HWC_IB_SYSFS, "res_mem_error", "res_mem_err"),
   HWC("res_cq_load_err",            HWC_IB_SYSFS, "res_cq_load_err"),
   HWC("res_srq_load_err",           HWC_IB_SYSFS, "res_srq_load_err"),
 
   /* RDMA request traffic (context) */
-  HWC("rx_write_req",               HWC_IB_SYSFS, "rx_write_req"),
-  HWC("rx_read_req",                HWC_IB_SYSFS, "rx_read_req"),
-  HWC("rx_atomic_req",              HWC_IB_SYSFS, "rx_atomic_req"),
+  HWC("rx_write_req",               HWC_IB_SYSFS, "rx_write_req", "rx_write_requests"),
+  HWC("rx_read_req",                HWC_IB_SYSFS, "rx_read_req", "rx_read_requests"),
+  HWC("rx_atomic_req",              HWC_IB_SYSFS, "rx_atomic_req", "rx_atomic_requests"),
 
-  /* Global PFC pause frames (ethtool, best-effort bnxt_en names). */
-  HWC_FB("pfc_rx_pause_frames",     HWC_ETHTOOL, "rx_pause_frames", "rx_pause_ctrl_phy"),
-  HWC_FB("pfc_tx_pause_frames",     HWC_ETHTOOL, "tx_pause_frames", "tx_pause_ctrl_phy"),
+  /* PFC frames summed over all priorities (bnxt_en ethtool). rx/tx_pause_frames
+   * are 802.3x link-level pause frames, a different mechanism, so they are
+   * reported separately. */
+  HWC("pfc_rx_pause_frames",        HWC_ETHTOOL, "rx_pfc_frames"),
+  HWC("pfc_tx_pause_frames",        HWC_ETHTOOL, "tx_pfc_frames"),
+  HWC("rx_pause_frames",            HWC_ETHTOOL, "rx_pause_frames"),
+  HWC("tx_pause_frames",            HWC_ETHTOOL, "tx_pause_frames"),
 };
 
 RCCL_TEL_HW_CONFIG(rcclHwConfigThor2, rcclHwcThor2, "thor2",
@@ -597,6 +610,7 @@ typedef struct {
 static void rcclTelemetryCollectHwCounters(RcclDeviceStats* dev);
 static int64_t rcclTelemetryReadSysfsCounter(const char* path);
 static int64_t rcclTelemetryReadHwCounter(const char* roce_device, const char* counter_name);
+static int64_t rcclTelemetryReadHwCounterAny(const char* roce_device, const RcclHwCounterDesc* d);
 static void rcclTelemetryGetDriverName(const char* roce_device, char* driver_name, size_t size);
 static void rcclTelemetryGetEthDevice(const char* roce_device, char* eth_device, size_t eth_device_size);
 static int rcclTelemetryIsCounterEnabled(const char* counter_name);
@@ -640,13 +654,13 @@ static void rcclTelemetryReadCounters(RcclDeviceStats* dev, int64_t* hwc,
 
 /*
  * Worst case of one batched ethtool query, derived rather than restated: every
- * counter of the widest possible table can contribute its key and its fallback,
+ * counter of the widest possible table can contribute all its alternative keys,
  * every PFC pattern is asked for at every priority, and the delta keys are
  * added once. Deriving it means adding counters cannot silently overflow the
  * request and drop the ones past the end.
  */
 #define RCCL_ETHTOOL_MAX_WANTED                                     \
-  (2 * RCCL_TELEMETRY_MAX_HWC +                                     \
+  (RCCL_TEL_HWC_MAX_KEYS * RCCL_TELEMETRY_MAX_HWC +                 \
    RCCL_TEL_NUM_PFC_PATTERNS * RCCL_TELEMETRY_NUM_PFC_PRIO +        \
    RCCL_TEL_NUM_DELTA_KEYS)
 
@@ -1234,21 +1248,16 @@ static void rcclTelemetryReadCounters(RcclDeviceStats* dev, int64_t* hwc,
     for (int p = 0; p < RCCL_TELEMETRY_NUM_PFC_PRIO; p++) pfc_out[k][p] = -1;
   *tx_bytes = *rx_bytes = *tx_packets = *rx_packets = -1;
 
-  /* 1. IB sysfs hw_counters (individual reads, with fallback key). */
+  /* 1. IB sysfs hw_counters (individual reads, first readable key wins). */
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source == HWC_IB_SYSFS && d->key != NULL &&
-        rcclTelemetryIsCounterEnabled(d->json_name)) {
-      int64_t v = rcclTelemetryReadHwCounter(dev->roce_device, d->key);
-      if (v < 0 && d->key_fallback != NULL)
-        v = rcclTelemetryReadHwCounter(dev->roce_device, d->key_fallback);
-      hwc[c] = v;
-    }
+    if (d->source == HWC_IB_SYSFS && rcclTelemetryIsCounterEnabled(d->json_name))
+      hwc[c] = rcclTelemetryReadHwCounterAny(dev->roce_device, d);
   }
 
   /* 2. Batched ethtool: scalar hw_counters + PFC per-priority + the 4-way
-   *    tx/rx bytes/packets sources. Both primary and fallback keys are queued
-   *    with the same target; the batch reader skips targets already >= 0. */
+   *    tx/rx bytes/packets sources. All alternative keys are queued with the
+   *    same target; the batch reader skips targets already >= 0. */
   /* Bounded by construction: num_counters is asserted against
    * RCCL_TELEMETRY_MAX_HWC when the table becomes a config, and
    * RCCL_ETHTOOL_MAX_WANTED is the exact worst case of the three loops below
@@ -1257,12 +1266,10 @@ static void rcclTelemetryReadCounters(RcclDeviceStats* dev, int64_t* hwc,
   int ew_n = 0;
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source != HWC_ETHTOOL || d->key == NULL) continue;
+    if (d->source != HWC_ETHTOOL) continue;
     if (!rcclTelemetryIsCounterEnabled(d->json_name)) continue;
-    snprintf(ew[ew_n].key, sizeof(ew[ew_n].key), "%s", d->key);
-    ew[ew_n].target = &hwc[c]; ew_n++;
-    if (d->key_fallback != NULL) {
-      snprintf(ew[ew_n].key, sizeof(ew[ew_n].key), "%s", d->key_fallback);
+    for (int k = 0; k < RCCL_TEL_HWC_MAX_KEYS && d->keys[k] != NULL; k++) {
+      snprintf(ew[ew_n].key, sizeof(ew[ew_n].key), "%s", d->keys[k]);
       ew[ew_n].target = &hwc[c]; ew_n++;
     }
   }
@@ -1299,13 +1306,13 @@ static void rcclTelemetryReadCounters(RcclDeviceStats* dev, int64_t* hwc,
   }
 
   /* 3. Debugfs counters (single file read, writes into hwc directly). */
-  RcclDebugfsWanted debugfs_list[RCCL_TELEMETRY_MAX_HWC];
+  RcclDebugfsWanted debugfs_list[RCCL_TEL_HWC_MAX_KEYS * RCCL_TELEMETRY_MAX_HWC];
   int debugfs_count = 0;
   for (int c = 0; c < hw->num_counters; c++) {
     const RcclHwCounterDesc* d = &hw->counters[c];
-    if (d->source == HWC_DEBUGFS && d->key != NULL &&
-        rcclTelemetryIsCounterEnabled(d->json_name)) {
-      debugfs_list[debugfs_count].key = d->key;
+    if (d->source != HWC_DEBUGFS || !rcclTelemetryIsCounterEnabled(d->json_name)) continue;
+    for (int k = 0; k < RCCL_TEL_HWC_MAX_KEYS && d->keys[k] != NULL; k++) {
+      debugfs_list[debugfs_count].key = d->keys[k];
       debugfs_list[debugfs_count].counter_idx = c;
       debugfs_count++;
     }
@@ -1399,6 +1406,40 @@ static int64_t rcclTelemetryReadHwCounter(const char* roce_device, const char* c
   return -1;
 }
 
+/* Value of the first of d's alternative keys that `read` can read (>= 0), else -1. */
+static int64_t rcclTelemetryReadFirstKey(const RcclHwCounterDesc* d,
+                                         int64_t (*read)(const char* key, void* ctx),
+                                         void* ctx, const char** key_out) {
+  for (int k = 0; k < RCCL_TEL_HWC_MAX_KEYS && d->keys[k] != NULL; k++) {
+    int64_t v = read(d->keys[k], ctx);
+    if (v >= 0) {
+      if (key_out != NULL) *key_out = d->keys[k];
+      return v;
+    }
+  }
+  return -1;
+}
+
+static int64_t rcclTelemetrySysfsKeyReader(const char* key, void* ctx) {
+  return rcclTelemetryReadHwCounter((const char*)ctx, key);
+}
+
+static int64_t rcclTelemetryReadHwCounterAny(const char* roce_device, const RcclHwCounterDesc* d) {
+  return rcclTelemetryReadFirstKey(d, rcclTelemetrySysfsKeyReader, (void*)roce_device, NULL);
+}
+
+int64_t rcclTelemetryHwCounterResolve(const char* driver_name, const char* json_name,
+                                      int64_t (*read)(const char* key, void* ctx),
+                                      void* ctx, const char** key_out) {
+  const RcclHwConfig* hw = rcclTelemetryResolveHw(driver_name);
+  if (hw == NULL) return -2;
+  for (int c = 0; c < hw->num_counters; c++) {
+    if (strcmp(hw->counters[c].json_name, json_name) == 0)
+      return rcclTelemetryReadFirstKey(&hw->counters[c], read, ctx, key_out);
+  }
+  return -2;
+}
+
 /* ------------------------------------------------------------------ */
 /* Periodic HW-counter sampler                                        */
 /* ------------------------------------------------------------------ */
@@ -1416,11 +1457,9 @@ static int rcclTelemetrySampledTableIdx(const RcclHwConfig* hw, int sampled) {
   return -1;
 }
 
-/* Read one resolved row, honouring the table's fallback sysfs key. */
+/* Read one resolved row, honouring the table's alternative sysfs keys. */
 static int64_t rcclTelemetrySampleRow(const RcclDeviceStats* dev, const RcclHwCounterDesc* d) {
-  int64_t v = rcclTelemetryReadHwCounter(dev->roce_device, d->key);
-  if (v < 0 && d->key_fallback != NULL) v = rcclTelemetryReadHwCounter(dev->roce_device, d->key_fallback);
-  return v;
+  return rcclTelemetryReadHwCounterAny(dev->roce_device, d);
 }
 
 /* Warn once about any sampled name that no configured device's table defines,
