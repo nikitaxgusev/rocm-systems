@@ -24,7 +24,11 @@
  *   COUNTER_SRC_IB_HW    – /sys/class/infiniband/<dev>/ports/<port>/hw_counters/
  *                           (port parsed from NCCL_IB_HCA suffix, default 1;
  *                            falls back to device-level hw_counters/ if needed)
- *   COUNTER_SRC_DEBUGFS  – /sys/kernel/debug/bnxt_re/<dev>/info
+ *   COUNTER_SRC_DEBUGFS  – /sys/kernel/debug/bnxt_re/<dev>/info (root only)
+ *
+ * Each counter lists alternative (source, key) pairs tried in order; the
+ * first one that can be read wins. A counter none of them can read is
+ * printed as "N/A N/A" (count, rate) so column positions are preserved.
  *************************************************************************/
 #ifndef __COLLECTOR_H__
 #define __COLLECTOR_H__
@@ -43,17 +47,23 @@ enum CounterSource {
   COUNTER_SRC_DEBUGFS
 };
 
-struct CounterDescriptor {
-  std::string name;           // canonical/display key (also primary sysfs lookup name)
+struct CounterSourceKey {
   CounterSource source;
-  bool is_prefix;             // true -> prefix match (expands to name0..name7)
-  std::string fallback_name;  // alternative sysfs key to try when 'name' is missing
+  // Exact key, or a "%d" pattern summed over priorities 0..7. With
+  // CounterDescriptor::is_prefix, every ethtool key starting with it is summed.
+  std::string key;
+};
+
+struct CounterDescriptor {
+  std::string name;                      // display name (table column header)
+  bool is_prefix;                        // ethtool keys are prefixes, summed
+  std::vector<CounterSourceKey> sources; // tried in order, first readable wins
 };
 
 typedef enum { NIC_UNKNOWN, NIC_BNXT_RE, NIC_IONIC } NicType;
 
 struct NetworkCounterSnapshot {
-  std::map<std::string, uint64_t> counters;
+  std::map<std::string, uint64_t> counters;  // display name -> value; absent = unreadable
   char    nic_name[256];
   char    ib_device[256];
   int64_t timestamp_us;
@@ -110,11 +120,13 @@ NetworkCounterSnapshot NetCounterCollectSnapshot(
     const std::string& nic,
     const std::vector<CounterDescriptor>& selected);
 
-// Compute delta for a single counter between two snapshots
-uint64_t NetCounterComputeDelta(
+// Compute delta for a single counter between two snapshots.
+// Returns false if the counter could not be read in either snapshot.
+bool NetCounterComputeDelta(
     const NetworkCounterSnapshot& before,
     const NetworkCounterSnapshot& after,
-    const CounterDescriptor& desc);
+    const CounterDescriptor& desc,
+    uint64_t& delta);
 
 // Print one table per node to stdout
 void NetCounterPrintTable(

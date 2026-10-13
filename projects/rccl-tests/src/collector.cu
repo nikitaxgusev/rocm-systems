@@ -23,61 +23,85 @@
 // =====================================================================
 //
 // Each NIC type has its own table with actual hardware key names.
-// name          : counter key (used in output headers and primary sysfs path)
-// source        : where to read the value
-// is_prefix     : true → prefix-match (expands to name0..name7)
-// fallback_name : alternative sysfs key to try if 'name' is not found (or NULL)
+// name      : display name (table column header; post-processing keys on it)
+// is_prefix : true → ethtool keys are prefixes, all matching keys are summed
+// src       : (source, key) alternatives tried in order, NULL key terminates.
+//             A key containing "%d" is summed over priorities 0..7.
+
+#define COUNTER_MAX_SOURCES 4
+
+struct CounterTableSource {
+  CounterSource source;
+  const char*   key;
+};
 
 struct CounterTableEntry {
-  const char*   name;
-  CounterSource source;
-  bool          is_prefix;
-  const char*   fallback_name;  // NULL = no fallback
+  const char*        name;
+  bool               is_prefix;
+  CounterTableSource src[COUNTER_MAX_SOURCES];
 };
+
+#define IB(k)  {COUNTER_SRC_IB_HW,   (k)}
+#define ETH(k) {COUNTER_SRC_ETHTOOL, (k)}
+#define DBG(k) {COUNTER_SRC_DEBUGFS, (k)}
 
 // ----- IONIC (AINIC) counter table -----
 static const CounterTableEntry ionic_table[] = {
-  // ethtool – PFC frame counters (prefix → expands to name0..name7)
-  {"frames_rx_pripause",       COUNTER_SRC_ETHTOOL,  true,  NULL},
-  {"frames_tx_pripause",       COUNTER_SRC_ETHTOOL,  true,  NULL},
+  // ethtool – PFC frame counters
+  {"frames_rx_pripause",       true,  {ETH("frames_rx_pripause")}},
+  {"frames_tx_pripause",       true,  {ETH("frames_tx_pripause")}},
   // IB hw_counters – CNP
-  {"rx_rdma_cnp_pkts",         COUNTER_SRC_IB_HW,    false, NULL},
-  {"tx_rdma_cnp_pkts",         COUNTER_SRC_IB_HW,    false, NULL},
+  {"rx_rdma_cnp_pkts",         false, {IB("rx_rdma_cnp_pkts")}},
+  {"tx_rdma_cnp_pkts",         false, {IB("tx_rdma_cnp_pkts")}},
   // IB hw_counters – errors & retransmits
-  {"rx_rdma_mtu_discard_pkts", COUNTER_SRC_IB_HW,    false, NULL},
-  {"resp_rx_outof_buf",        COUNTER_SRC_IB_HW,    false, NULL},
-  {"tx_rdma_ack_timeout",      COUNTER_SRC_IB_HW,    false, NULL},
-  {"req_tx_retry_excd_err",    COUNTER_SRC_IB_HW,    false, NULL},
-  {"resp_rx_outouf_seq",       COUNTER_SRC_IB_HW,    false, NULL},
-  {"req_rx_pkt_seq_err",       COUNTER_SRC_IB_HW,    false, NULL},
+  {"rx_rdma_mtu_discard_pkts", false, {IB("rx_rdma_mtu_discard_pkts")}},
+  {"resp_rx_outof_buf",        false, {IB("resp_rx_outof_buf")}},
+  {"tx_rdma_ack_timeout",      false, {IB("tx_rdma_ack_timeout")}},
+  {"req_tx_retry_excd_err",    false, {IB("req_tx_retry_excd_err")}},
+  {"resp_rx_outouf_seq",       false, {IB("resp_rx_outouf_seq")}},
+  {"req_rx_pkt_seq_err",       false, {IB("req_rx_pkt_seq_err")}},
   // IB hw_counters – RDMA throughput
-  {"tx_rdma_ucast_bytes",      COUNTER_SRC_IB_HW,    false, NULL},
-  {"rx_rdma_ucast_bytes",      COUNTER_SRC_IB_HW,    false, NULL},
-  {"tx_rdma_ucast_pkts",       COUNTER_SRC_IB_HW,    false, NULL},
-  {"rx_rdma_ucast_pkts",       COUNTER_SRC_IB_HW,    false, NULL},
+  {"tx_rdma_ucast_bytes",      false, {IB("tx_rdma_ucast_bytes")}},
+  {"rx_rdma_ucast_bytes",      false, {IB("rx_rdma_ucast_bytes")}},
+  {"tx_rdma_ucast_pkts",       false, {IB("tx_rdma_ucast_pkts")}},
+  {"rx_rdma_ucast_pkts",       false, {IB("rx_rdma_ucast_pkts")}},
 };
 static const int ionic_table_size = (int)(sizeof(ionic_table) / sizeof(ionic_table[0]));
 
 // ----- BNXT_RE (Thor2) counter table -----
+// bnxt_re sysfs names differ between the upstream kernel driver and the
+// Broadcom out-of-tree driver (e.g. to_retransmits vs local_ack_timeout_err,
+// seq_err_naks_rcvd vs packet_seq_err), so both are listed. debugfs needs root
+// and is only the last resort.
 static const CounterTableEntry bnxt_re_table[] = {
-  // ethtool – PFC frame counters (prefix → expands to name0..name7)
-  {"rx_pfc_ena_frames_pri",   COUNTER_SRC_ETHTOOL,  true,  NULL},
-  {"tx_pfc_ena_frames_pri",   COUNTER_SRC_ETHTOOL,  true,  NULL},
-  // ethtool – PFC transition counters (exact)
-  {"pfc_pri3_rx_transitions", COUNTER_SRC_ETHTOOL,  false, NULL},
-  {"pfc_pri3_tx_transitions", COUNTER_SRC_ETHTOOL,  false, NULL},
-  // IB hw_counters – CNP (try rx_cnp_pkts first, fall back to rp_cnp_handled)
-  {"rx_cnp_pkts",             COUNTER_SRC_IB_HW,    false, "rp_cnp_handled"},
-  {"tx_cnp_pkts",             COUNTER_SRC_IB_HW,    false, "np_cnp_sent"},
-  {"rx_roce_discards",        COUNTER_SRC_IB_HW,    false, NULL},
-  // debugfs (bnxt_re info)
-  {"rx_stat_discards",        COUNTER_SRC_DEBUGFS,  false, NULL},
-  {"to_retransmits",          COUNTER_SRC_DEBUGFS,  false, NULL},
-  {"max_retry_exceeded",      COUNTER_SRC_DEBUGFS,  false, NULL},
-  {"oos_drop_count",          COUNTER_SRC_DEBUGFS,  false, NULL},
-  {"seq_err_naks_rcvd",       COUNTER_SRC_DEBUGFS,  false, NULL},
+  // ethtool – PFC frame counters, summed over priorities
+  {"rx_pfc_ena_frames_pri",   true,  {ETH("rx_pfc_ena_frames_pri")}},
+  {"tx_pfc_ena_frames_pri",   true,  {ETH("tx_pfc_ena_frames_pri")}},
+  // ethtool – PFC transition counters for the RoCE priority
+  {"pfc_pri3_rx_transitions", false, {ETH("pfc_pri3_rx_transitions")}},
+  {"pfc_pri3_tx_transitions", false, {ETH("pfc_pri3_tx_transitions")}},
+  // IB hw_counters – CNP
+  {"rx_cnp_pkts",             false, {IB("rx_cnp_pkts"), IB("rp_cnp_handled")}},
+  {"tx_cnp_pkts",             false, {IB("tx_cnp_pkts"), IB("np_cnp_sent")}},
+  {"rx_roce_discards",        false, {IB("rx_roce_discards"), IB("rx_discards")}},
+  // retransmit / drop counters: sysfs first, then ethtool, debugfs last
+  {"rx_stat_discards",        false, {ETH("rx_stat_discard"), DBG("rx_stat_discards")}},
+  {"to_retransmits",          false, {IB("to_retransmits"), IB("local_ack_timeout_err"),
+                                      DBG("to_retransmits")}},
+  {"max_retry_exceeded",      false, {IB("max_retry_exceeded"), DBG("max_retry_exceeded")}},
+  {"oos_drop_count",          false, {IB("res_oos_drop_count"), IB("oos_drop_count"),
+                                      IB("out_of_sequence"), DBG("res_oos_drop_count")}},
+  {"seq_err_naks_rcvd",       false, {IB("seq_err_naks_rcvd"), IB("packet_seq_err"),
+                                      DBG("seq_err_naks_rcvd")}},
+  // ethtool – PFC transitions summed over all priorities
+  {"pfc_rx_transitions",      false, {ETH("pfc_pri%d_rx_transitions")}},
+  {"pfc_tx_transitions",      false, {ETH("pfc_pri%d_tx_transitions")}},
 };
 static const int bnxt_re_table_size = (int)(sizeof(bnxt_re_table) / sizeof(bnxt_re_table[0]));
+
+#undef IB
+#undef ETH
+#undef DBG
 
 static void GetTable(NicType nic_type,
                      const CounterTableEntry*& table, int& size) {
@@ -148,7 +172,10 @@ static bool CounterMatchesRequestedFilter(const CounterTableEntry& entry) {
   const std::set<std::string>& filter = RequestedCounterFilter();
   if (filter.empty()) { return true; }
   if (filter.count(entry.name) > 0) { return true; }
-  return entry.fallback_name != NULL && filter.count(entry.fallback_name) > 0;
+  for (int s = 0; s < COUNTER_MAX_SOURCES && entry.src[s].key; s++) {
+    if (filter.count(entry.src[s].key) > 0) { return true; }
+  }
+  return false;
 }
 
 bool NetCounterIsEnabled() {
@@ -167,8 +194,13 @@ std::vector<CounterDescriptor> NetCounterGetCounterList(NicType nic_type) {
   GetTable(nic_type, table, size);
   for (int i = 0; i < size; i++) {
     if (!CounterMatchesRequestedFilter(table[i])) continue;
-    result.push_back({table[i].name, table[i].source, table[i].is_prefix,
-                      table[i].fallback_name ? table[i].fallback_name : ""});
+    CounterDescriptor d;
+    d.name = table[i].name;
+    d.is_prefix = table[i].is_prefix;
+    for (int s = 0; s < COUNTER_MAX_SOURCES && table[i].src[s].key; s++) {
+      d.sources.push_back({table[i].src[s].source, table[i].src[s].key});
+    }
+    result.push_back(d);
   }
   return result;
 }
@@ -344,20 +376,10 @@ NicType DetectNicTypeFromSnapshots(
 // Per-source collection
 // =====================================================================
 
-static void CollectEthtoolCounters(const std::string& nic,
-                                   const std::vector<CounterDescriptor>& selected,
-                                   std::map<std::string, uint64_t>& out) {
-  std::set<std::string> exact;
-  std::vector<std::string> prefixes;
-  for (const auto& d : selected) {
-    if (d.source != COUNTER_SRC_ETHTOOL) { continue; }
-    if (d.is_prefix) {
-      prefixes.push_back(d.name);
-    } else {
-      exact.insert(d.name);
-    }
-  }
-  if (exact.empty() && prefixes.empty()) { return; }
+typedef std::map<std::string, uint64_t> RawCounterMap;
+
+static void ReadEthtoolCounters(const std::string& nic, RawCounterMap& out) {
+  if (nic.empty()) { return; }
 
   char command[512] = {0};
   snprintf(command, sizeof(command), "ethtool -S %s 2>/dev/null", nic.c_str());
@@ -370,102 +392,85 @@ static void CollectEthtoolCounters(const std::string& nic,
     char key[256] = {0};
     unsigned long long tmp = 0;
     if (sscanf(line, "%255[^:]: %llu", key, &tmp) == 2) {
-      uint64_t value = (uint64_t)tmp;
       char* start = key;
       while (*start == ' ' || *start == '\t') { start++; }
-      std::string k(start);
-      if (exact.count(k)) {
-        out[k] = value;
-        continue;
-      }
-      for (const auto& pfx : prefixes) {
-        if (k.compare(0, pfx.size(), pfx) == 0) {
-          out[k] = value;
-          break;
-        }
-      }
+      out[std::string(start)] = (uint64_t)tmp;
     }
   }
   pclose(fp);
 }
 
-static void CollectIbHwCounters(const std::string& ib_device,
-                                const std::vector<CounterDescriptor>& selected,
-                                std::map<std::string, uint64_t>& out) {
-  if (ib_device.empty()) { return; }
+static void ReadDebugfsCounters(const std::string& ib_base, RawCounterMap& out) {
+  if (ib_base.empty()) { return; }
 
-  std::string ib_base;
-  int ib_port;
-  ParseIbDevice(ib_device, ib_base, ib_port);
-  char port_str[16];
-  snprintf(port_str, sizeof(port_str), "%d", ib_port);
-  std::string base_port =
-      "/sys/class/infiniband/" + ib_base + "/ports/" + port_str + "/hw_counters/";
-  std::string base_dev =
-      "/sys/class/infiniband/" + ib_base + "/hw_counters/";
-
-  for (const auto& d : selected) {
-    if (d.source != COUNTER_SRC_IB_HW) continue;
-    std::string path = base_port + d.name;
-    FILE* fp = fopen(path.c_str(), "r");
-    if (!fp) fp = fopen((base_dev + d.name).c_str(), "r");
-    // If primary name not found, try fallback
-    if (!fp && !d.fallback_name.empty()) {
-      fp = fopen((base_port + d.fallback_name).c_str(), "r");
-      if (!fp) fp = fopen((base_dev + d.fallback_name).c_str(), "r");
-    }
-    if (fp) {
-      unsigned long long tmp = 0;
-      if (fscanf(fp, "%llu", &tmp) == 1) out[d.name] = (uint64_t)tmp;
-      fclose(fp);
-    }
-  }
-}
-
-static void CollectDebugCounters(const std::string& ib_device,
-                                 const std::vector<CounterDescriptor>& selected,
-                                 std::map<std::string, uint64_t>& out) {
-  if (ib_device.empty()) return;
-
-  std::set<std::string> wanted;
-  for (const auto& d : selected) {
-    if (d.source == COUNTER_SRC_DEBUGFS) {
-      wanted.insert(d.name);
-    }
-  }
-  if (wanted.empty()) { return; }
-
-  std::string ib_base;
-  int port;
-  ParseIbDevice(ib_device, ib_base, port);
-  (void)port;
-  std::string info_path =
-      "/sys/kernel/debug/bnxt_re/" + ib_base + "/info";
+  std::string info_path = "/sys/kernel/debug/bnxt_re/" + ib_base + "/info";
   FILE* fp = fopen(info_path.c_str(), "r");
   if (!fp) { return; }
 
   char line[512] = {0};
   while (fgets(line, sizeof(line), fp)) {
-    for (const auto& name : wanted) {
-      if (strstr(line, name.c_str())) {
-        unsigned long long tmp = 0;
-        char key[256] = {0};
-        if (sscanf(line, " %255[^:=] %*[:=] %llu", key, &tmp) == 2 ||
-            sscanf(line, " %255s %llu", key, &tmp) == 2) {
-          uint64_t value = (uint64_t)tmp;
-          char* start = key;
-          while (*start == ' ' || *start == '\t') { start++; }
-          char* end = start + strlen(start) - 1;
-          while (end > start && (*end == ' ' || *end == '\t')) { *end-- = '\0'; }
-          if (wanted.count(std::string(start))) {
-            out[std::string(start)] = value;
-          }
-        }
-        break;
-      }
+    unsigned long long tmp = 0;
+    char key[256] = {0};
+    if (sscanf(line, " %255[^:=] %*[:=] %llu", key, &tmp) == 2 ||
+        sscanf(line, " %255s %llu", key, &tmp) == 2) {
+      char* start = key;
+      while (*start == ' ' || *start == '\t') { start++; }
+      char* end = start + strlen(start) - 1;
+      while (end > start && (*end == ' ' || *end == '\t')) { *end-- = '\0'; }
+      out[std::string(start)] = (uint64_t)tmp;
     }
   }
   fclose(fp);
+}
+
+static bool ReadIbHwCounter(const std::string& base_port,
+                            const std::string& base_dev,
+                            const std::string& key, uint64_t& value) {
+  FILE* fp = fopen((base_port + key).c_str(), "r");
+  if (!fp) fp = fopen((base_dev + key).c_str(), "r");
+  if (!fp) { return false; }
+  unsigned long long tmp = 0;
+  bool ok = fscanf(fp, "%llu", &tmp) == 1;
+  fclose(fp);
+  if (ok) { value = (uint64_t)tmp; }
+  return ok;
+}
+
+// Looks up an exact key, a "%d" pattern (summed over priorities 0..7) or,
+// with is_prefix, every key starting with 'key' (summed).
+static bool LookupRawCounter(const RawCounterMap& raw, const std::string& key,
+                             bool is_prefix, uint64_t& value) {
+  bool found = false;
+  uint64_t sum = 0;
+  if (key.find("%d") != std::string::npos) {
+    for (int prio = 0; prio < 8; prio++) {
+      char name[256];
+      snprintf(name, sizeof(name), key.c_str(), prio);
+      auto it = raw.find(name);
+      if (it != raw.end()) { sum += it->second; found = true; }
+    }
+  } else if (is_prefix) {
+    for (auto it = raw.lower_bound(key);
+         it != raw.end() && it->first.compare(0, key.size(), key) == 0; ++it) {
+      sum += it->second;
+      found = true;
+    }
+  } else {
+    auto it = raw.find(key);
+    if (it != raw.end()) { sum = it->second; found = true; }
+  }
+  if (found) { value = sum; }
+  return found;
+}
+
+static bool NeedsSource(const std::vector<CounterDescriptor>& selected,
+                        CounterSource source) {
+  for (const auto& d : selected) {
+    for (const auto& s : d.sources) {
+      if (s.source == source) { return true; }
+    }
+  }
+  return false;
 }
 
 // =====================================================================
@@ -494,9 +499,56 @@ NetworkCounterSnapshot NetCounterCollectSnapshot(
   snap.timestamp_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
   snap.nic_type = NetCounterDetectNicType(ib_dev);
 
-  CollectEthtoolCounters(nic, selected, snap.counters);
-  CollectIbHwCounters(ib_dev, selected, snap.counters);
-  CollectDebugCounters(ib_dev, selected, snap.counters);
+  std::string ib_base;
+  int ib_port = 1;
+  if (!ib_dev.empty()) { ParseIbDevice(ib_dev, ib_base, ib_port); }
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", ib_port);
+  std::string base_port =
+      "/sys/class/infiniband/" + ib_base + "/ports/" + port_str + "/hw_counters/";
+  std::string base_dev = "/sys/class/infiniband/" + ib_base + "/hw_counters/";
+
+  RawCounterMap ethtool, debugfs;
+  if (NeedsSource(selected, COUNTER_SRC_ETHTOOL)) { ReadEthtoolCounters(nic, ethtool); }
+  bool debugfs_read = false;
+
+  for (const auto& d : selected) {
+    for (const auto& s : d.sources) {
+      uint64_t value = 0;
+      bool found = false;
+      switch (s.source) {
+        case COUNTER_SRC_IB_HW:
+          if (ib_base.empty()) { break; }
+          if (s.key.find("%d") != std::string::npos) {
+            uint64_t sum = 0;
+            for (int prio = 0; prio < 8; prio++) {
+              char name[256];
+              snprintf(name, sizeof(name), s.key.c_str(), prio);
+              uint64_t v = 0;
+              if (ReadIbHwCounter(base_port, base_dev, name, v)) { sum += v; found = true; }
+            }
+            value = sum;
+          } else {
+            found = ReadIbHwCounter(base_port, base_dev, s.key, value);
+          }
+          break;
+        case COUNTER_SRC_ETHTOOL:
+          found = LookupRawCounter(ethtool, s.key, d.is_prefix, value);
+          break;
+        case COUNTER_SRC_DEBUGFS:
+          if (!debugfs_read) {
+            ReadDebugfsCounters(ib_base, debugfs);
+            debugfs_read = true;
+          }
+          found = LookupRawCounter(debugfs, s.key, false, value);
+          break;
+      }
+      if (found) {
+        snap.counters[d.name] = value;
+        break;
+      }
+    }
+  }
 
   return snap;
 }
@@ -512,30 +564,17 @@ NetworkCounterSnapshot NetCounterCollectSnapshot(
 // Delta computation
 // =====================================================================
 
-uint64_t NetCounterComputeDelta(
+bool NetCounterComputeDelta(
     const NetworkCounterSnapshot& before,
     const NetworkCounterSnapshot& after,
-    const CounterDescriptor& desc) {
-  uint64_t delta = 0;
-  if (desc.is_prefix) {
-    for (const auto& entry : after.counters) {
-      if (entry.first.compare(0, desc.name.size(), desc.name) == 0) {
-        uint64_t a = entry.second;
-        uint64_t b = 0;
-        auto it = before.counters.find(entry.first);
-        if (it != before.counters.end()) { b = it->second; }
-        delta += (a - b);
-      }
-    }
-  } else {
-    uint64_t a = 0, b = 0;
-    auto it = before.counters.find(desc.name);
-    if (it != before.counters.end()) { b = it->second; }
-    it = after.counters.find(desc.name);
-    if (it != after.counters.end()) { a = it->second; }
-    delta = a - b;
-  }
-  return delta;
+    const CounterDescriptor& desc,
+    uint64_t& delta) {
+  delta = 0;
+  auto b = before.counters.find(desc.name);
+  auto a = after.counters.find(desc.name);
+  if (b == before.counters.end() || a == after.counters.end()) { return false; }
+  delta = a->second - b->second;
+  return true;
 }
 
 // =====================================================================
@@ -576,12 +615,15 @@ void NetCounterPrintTable(
   std::vector<std::vector<double>> rates(
       num_nics, std::vector<double>(num_counters, 0.0));
 
+  std::vector<std::vector<bool>> avail(
+      num_nics, std::vector<bool>(num_counters, false));
+
   std::vector<double> dur_sec(num_nics);
 
   for (size_t n = 0; n < num_nics; n++) {
     dur_sec[n] = (after[n].timestamp_us - before[n].timestamp_us) / 1e6;
     for (size_t c = 0; c < num_counters; c++) {
-      deltas[n][c] = NetCounterComputeDelta(before[n], after[n], selected[c]);
+      avail[n][c] = NetCounterComputeDelta(before[n], after[n], selected[c], deltas[n][c]);
       rates[n][c] = (dur_sec[n] > 0.0)
                         ? (double)deltas[n][c] / dur_sec[n]
                         : 0.0;
@@ -660,7 +702,12 @@ void NetCounterPrintTable(
   for (size_t n = 0; n < num_nics; n++) {
     printf("%-*s", nic_w, labels[n].c_str());
     for (size_t c = 0; c < num_counters; c++) {
-      printf("  %*llu  %*.2f", cnt_w[c], (unsigned long long)deltas[n][c], rt_w[c], rates[n][c]);
+      if (avail[n][c]) {
+        printf("  %*llu  %*.2f", cnt_w[c], (unsigned long long)deltas[n][c], rt_w[c], rates[n][c]);
+      } else {
+        // Two tokens so whitespace-split post-processing keeps column pairs aligned.
+        printf("  %*s  %*s", cnt_w[c], "N/A", rt_w[c], "N/A");
+      }
     }
     printf("\n");
   }
