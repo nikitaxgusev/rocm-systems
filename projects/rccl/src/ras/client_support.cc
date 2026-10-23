@@ -1166,6 +1166,11 @@ static ncclResult_t rasClientRunComms(struct rasClient* client) {
   char* msg = nullptr;
   int msgLen;
   struct rasCollective* coll = client->coll;
+  // Validate the collective before dereferencing it or its data below (TRACE, commsData, etc.).
+  if (coll == nullptr || coll->data == nullptr) {
+    INFO(NCCL_RAS, "RAS invalid collective operation status; client status %d -- internal error?", client->status);
+    return ncclInternalError;
+  }
   struct rasCollComms* commsData = (struct rasCollComms*)coll->data;
   struct rasCollComms::comm* comm;
   struct rasAuxCommRank* auxCommRanks = nullptr;
@@ -1210,12 +1215,26 @@ static ncclResult_t rasClientRunComms(struct rasClient* client) {
   // Sort the communicators by size.  As the structure is inconvenient to move around due to the elements being
   // of variable length, we create an auxiliary array that includes pointers to individual elements and simply sort
   // that array while keeping the data intact.
+  if (commsData->nComms < 0) {
+    INFO(NCCL_RAS, "RAS rejecting malformed communicators report with nComms %d", commsData->nComms);
+    ret = ncclInternalError;
+    goto fail;
+  }
   NCCLCHECKGOTO(ncclCalloc(&auxComms, commsData->nComms), ret, fail);
   // While initializing the just allocated array, also find out the size of the largest communicator so that we know
   // how much memory to allocate for another temporary array.
   maxCommSize = 0;
   comm = commsData->comms;
   for (int commIdx = 0; commIdx < commsData->nComms; commIdx++) {
+    // Reject inconsistent peer-supplied counts before they are used to size/index scratch arrays.
+    // auxCommRanks below is sized by commNRanks but written with nRanks entries, so nRanks must not
+    // exceed commNRanks (nor be negative), or the writes overrun the allocation.
+    if (comm->commNRanks < 0 || comm->nRanks < 0 || comm->nMissingRanks < 0 || comm->nRanks > comm->commNRanks) {
+      INFO(NCCL_RAS, "RAS rejecting malformed communicator record (commNRanks %d, nRanks %d, nMissingRanks %d)",
+           comm->commNRanks, comm->nRanks, comm->nMissingRanks);
+      ret = ncclInternalError;
+      goto fail;
+    }
     if (maxCommSize < comm->commNRanks) maxCommSize = comm->commNRanks;
     auxComms[commIdx].comm = comm;
     comm = (struct rasCollComms::comm*)(((char*)(comm + 1)) + comm->nRanks * sizeof(*comm->ranks) +
@@ -1584,7 +1603,17 @@ static ncclResult_t rasClientRunComms(struct rasClient* client) {
         rasOutAppend("#%d-%d (%016lx) ERROR\n", vcIdx, commIdx - vc->firstIdx, comm->commId.commHash);
 
         memset(ncclErrors, '\0', sizeof(ncclErrors));
-        for (int rankIdx = 0; rankIdx < comm->nRanks; rankIdx++) ncclErrors[comm->ranks[rankIdx].status.initState]++;
+        // status.initState/asyncError are 4-bit fields (0..15) filled from peer data, but ncclErrors
+        // has only ncclNumResults entries; range-check before indexing to avoid an out-of-bounds write.
+        for (int rankIdx = 0; rankIdx < comm->nRanks; rankIdx++) {
+          int initState = (int)comm->ranks[rankIdx].status.initState;
+          if (initState < 0 || initState >= ncclNumResults) {
+            INFO(NCCL_RAS, "RAS rejecting out-of-range initState %d in communicator report", initState);
+            ret = ncclInternalError;
+            goto fail;
+          }
+          ncclErrors[initState]++;
+        }
         nErrors = comm->nRanks - (ncclErrors[ncclSuccess] + ncclErrors[ncclInProgress]);
         if (nErrors > 0) {
           rasOutAppend("  Initialization error%s on %d rank%s\n", (nErrors > 1 ? "s" : ""), nErrors,
@@ -1593,7 +1622,15 @@ static ncclResult_t rasClientRunComms(struct rasClient* client) {
         }
 
         memset(ncclErrors, '\0', sizeof(ncclErrors));
-        for (int rankIdx = 0; rankIdx < comm->nRanks; rankIdx++) ncclErrors[comm->ranks[rankIdx].status.asyncError]++;
+        for (int rankIdx = 0; rankIdx < comm->nRanks; rankIdx++) {
+          int asyncError = (int)comm->ranks[rankIdx].status.asyncError;
+          if (asyncError < 0 || asyncError >= ncclNumResults) {
+            INFO(NCCL_RAS, "RAS rejecting out-of-range asyncError %d in communicator report", asyncError);
+            ret = ncclInternalError;
+            goto fail;
+          }
+          ncclErrors[asyncError]++;
+        }
         nErrors = comm->nRanks - (ncclErrors[ncclSuccess] + ncclErrors[ncclInProgress]);
         if (nErrors > 0) {
           rasOutAppend("  Asynchronous error%s on %d rank%s\n", (nErrors > 1 ? "s" : ""), nErrors,
