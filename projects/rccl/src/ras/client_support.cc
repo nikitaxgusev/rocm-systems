@@ -481,10 +481,16 @@ void rasClientEventLoop(struct rasClient* client, int pollIdx) {
         char* endPtr = nullptr;
         errno = 0;
         double timeout = strtod(cmd + strlen("timeout "), &endPtr);
-        if (errno != 0 || !endPtr || *endPtr != '\0' || !std::isfinite(timeout) || timeout < 0.0) {
+        // Scale to clock units in double and range-check before the int64 conversion: a finite but
+        // huge seconds value (e.g. 1e10) scales past the signed 64-bit range, and that conversion is
+        // undefined behavior. double(INT64_MAX) rounds up to 2^63, so reject at >= 2^63.
+        double scaledTimeout = timeout * (double)CLOCK_UNITS_PER_SEC;
+        constexpr double kInt64Max = 9223372036854775808.0; // 2^63
+        if (errno != 0 || !endPtr || *endPtr != '\0' || !std::isfinite(timeout) || timeout < 0.0 ||
+            !std::isfinite(scaledTimeout) || scaledTimeout >= kInt64Max) {
           snprintf(rasLine, sizeof(rasLine), "ERROR: Invalid timeout value %s\n", cmd + strlen("timeout "));
         } else {
-          client->timeout = timeout * CLOCK_UNITS_PER_SEC;
+          client->timeout = (int64_t)scaledTimeout;
           strcpy(rasLine, "OK\n");
         }
         if (rasClientEnqueueString(client, rasLine) != ncclSuccess) {
