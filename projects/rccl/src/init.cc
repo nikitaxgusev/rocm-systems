@@ -4993,6 +4993,11 @@ ncclResult_t ncclCommGrow_impl(ncclComm_t comm, int nRanks, const ncclUniqueId* 
   struct ncclCommInitRankAsyncJob* job = NULL;
   ncclComm_t newComm = NULL;
   struct ncclBootstrapHandle recvHandle;
+  // Full-width, zero-initialized staging id for the boundary-rank grow path. The received
+  // bootstrap handle is smaller than ncclUniqueId, so we must not alias it directly and then
+  // copy at ncclUniqueId width (that over-reads the stack). Staging here mirrors
+  // ncclCommGetUniqueId_impl() and keeps the handle followed by zeroes.
+  ncclUniqueId grownId;
 
   *newcomm = NULL; // Initialize output parameter early in case of early errors
 
@@ -5021,7 +5026,11 @@ ncclResult_t ncclCommGrow_impl(ncclComm_t comm, int nRanks, const ncclUniqueId* 
         res = ncclInvalidArgument;
         goto exit;
       }
-      uniqueId = (const ncclUniqueId*)&recvHandle;
+      // Stage the smaller handle into a zero-initialized unique id instead of aliasing it, so the
+      // later full-width memcpy into job->commId reads a valid ncclUniqueId, not past recvHandle.
+      memset(&grownId, 0, sizeof(ncclUniqueId));
+      memcpy(&grownId, &recvHandle, sizeof(recvHandle));
+      uniqueId = &grownId;
     }
   } else {
     // New ranks: validate parameters
