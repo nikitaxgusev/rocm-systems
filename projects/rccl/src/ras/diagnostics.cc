@@ -446,7 +446,19 @@ static ncclResult_t rasDiagnosticsSummarizePeerPayloads(const struct rasDiagnost
       }
 
       checkHeader = (const struct rasDiagnosticsCheckPayloadHeader*)(data + peerOffset);
-      NCCLCHECKGOTO(rasDiagnosticsGetCheck(checkHeader->checkId, &check), ret, exit);
+      // Decode the peer-supplied check id as a raw integer before validating. rasDiagnosticsCheckId
+      // has no fixed underlying type, so loading an out-of-range wire value (e.g. -1 or 99) as the
+      // enum is undefined behavior. Read the bytes, range-check, then convert to the enum.
+      int wireCheckId = 0;
+      static_assert(sizeof(wireCheckId) == sizeof(checkHeader->checkId),
+                    "checkId wire width must match int for safe raw decode");
+      memcpy(&wireCheckId, &checkHeader->checkId, sizeof(wireCheckId));
+      if (wireCheckId < 0 || wireCheckId >= RAS_DIAG_CHECK_COUNT) {
+        WARN("RAS diagnostics gathered payload has out-of-range check id %d", wireCheckId);
+        ret = ncclInternalError;
+        goto exit;
+      }
+      NCCLCHECKGOTO(rasDiagnosticsGetCheck((rasDiagnosticsCheckId)wireCheckId, &check), ret, exit);
       id = (int)check->id;
       if (checkHeader->recordStride <= 0 || checkHeader->nRecords < 0 || checkHeader->payloadBytes < 0 ||
           checkHeader->payloadBytes > peerEnd - peerOffset - (int)sizeof(*checkHeader) ||
@@ -484,7 +496,9 @@ static ncclResult_t rasDiagnosticsSummarizePeerPayloads(const struct rasDiagnost
     for (int checkIdx = 0; checkIdx < peerHeader->nChecks; checkIdx++) {
       const struct rasDiagnosticsCheckPayloadHeader* checkHeader =
         (const struct rasDiagnosticsCheckPayloadHeader*)(data + peerOffset);
-      int id = (int)checkHeader->checkId;
+      // Raw-decode again (validated in the first pass above) to avoid an out-of-range enum load.
+      int id = 0;
+      memcpy(&id, &checkHeader->checkId, sizeof(id));
 
       peerOffset += sizeof(*checkHeader);
       if (checkHeader->payloadBytes > 0) {
